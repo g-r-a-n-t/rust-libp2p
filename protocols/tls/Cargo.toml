@@ -17,9 +17,10 @@ tokio-io = "0.1.0"
 bytes = "0.4"
 log = "0.4.6"
 openssl = "0.10"
-rustls = { version = "0.15", features = ["dangerous_configuration"] }
 rand = "0.6"
 quinn-proto = "0.2"
 simple_asn1 = "0.3"
 webpki = "0.19"
 tokio-threadpool = "0.1"
+rustls = { version = "0.15", features = ["dangerous_configuration"] }
+tokio-rustls = "0.10.0-alpha.3"

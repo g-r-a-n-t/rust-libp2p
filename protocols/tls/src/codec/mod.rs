@@ -2,55 +2,35 @@ use tokio_io::{AsyncRead, AsyncWrite};
 use futures::{Sink, StartSend, Poll, Stream, Async, AsyncSink};
 use rustls::TLSError;
 use libp2p_core::Negotiated;
-use bytes::BufMut;
-use std::io::{Error as IoError, ErrorKind as IoErrorKind, Write};
-use rustls::{RootCertStore, Session, NoClientAuth, AllowAnyAuthenticatedClient,
-             AllowAnyAnonymousOrAuthenticatedClient};
+use tokio_rustls::{server, client};
 use std::io::Read;
 use tokio_threadpool::blocking;
+use std::io;
 
 pub struct FullCodec<S>
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    server_session: Option<rustls::ServerSession>,
-    client_session: Option<rustls::ClientSession>,
-    socket: S,
+    server_stream: Option<Box<server::TlsStream<S>>>,
+    client_stream: Option<Box<client::TlsStream<S>>>,
 }
 
 impl<S> FullCodec<S>
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    pub fn from_server(mut socket: S, mut session: rustls::ServerSession) -> Self {
+    pub fn from_server(server_stream: Box<server::TlsStream<S>>) -> Self {
         FullCodec {
-            server_session: Some(session),
-            client_session: None,
-            socket,
+            server_stream: Some(server_stream),
+            client_stream: None,
         }
     }
 
-    pub fn from_client(mut socket: S, mut session: rustls::ClientSession) -> Self {
-        let client_stream = rustls::Stream::new(&mut session, &mut socket);
+    pub fn from_client(client_stream: Box<client::TlsStream<S>>) -> Self {
         FullCodec {
-            server_session: None,
-            client_session: Some(session),
-            socket,
+            server_stream: None,
+            client_stream: Some(client_stream),
         }
-    }
-
-    fn as_server_stream(&mut self) -> Option<rustls::Stream<rustls::ServerSession, S>> {
-        if let Some(ref mut server_session) = self.server_session {
-            return Some(rustls::Stream::new(server_session, &mut self.socket));
-        }
-        None
-    }
-
-    fn as_client_stream(&mut self) -> Option<rustls::Stream<rustls::ClientSession, S>> {
-        if let Some(ref mut client_session) = self.client_session {
-            return Some(rustls::Stream::new(client_session, &mut self.socket));
-        }
-        None
     }
 }
 
@@ -59,25 +39,44 @@ impl<S> Sink for FullCodec<S>
         S: AsyncRead + AsyncWrite + Send + 'static,
 {
     type SinkItem = Vec<u8>;
-    type SinkError = IoError;
+    type SinkError = io::Error;
 
     #[inline]
     fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        println!("sending tls...");
-        if let Some(ref mut stream) = self.as_server_stream() {
-            let n = stream.write(&item).unwrap();
-            println!("sent {}", n);
-        } else if let Some(ref mut stream) = self.as_client_stream() {
-            let n = stream.write(&item).unwrap();
-            println!("sent {}", n);
+        println!("staring send...");
+        if let Some(ref mut stream) = self.server_stream {
+            return match stream.poll_write(&item) {
+                Ok(Async::Ready(_)) => Ok(AsyncSink::Ready),
+                _ => Ok(AsyncSink::NotReady(item))
+            };
+        } else if let Some(ref mut stream) = self.client_stream {
+            return match stream.poll_write(&item) {
+                Ok(Async::Ready(_)) => Ok(AsyncSink::Ready),
+                _ => Ok(AsyncSink::NotReady(item))
+            };
         }
 
-        Ok(AsyncSink::Ready)
+        println!("not ready to send");
+        Ok(AsyncSink::NotReady(item))
     }
 
     #[inline]
     fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        Ok(Async::Ready(()))
+        println!("completing send...");
+        if let Some(ref mut stream) = self.server_stream {
+            return match stream.poll_flush() {
+                Ok(Async::Ready(_)) => Ok(Async::Ready(())),
+                _ => Ok(Async::NotReady)
+            };
+        } else if let Some(ref mut stream) = self.client_stream {
+            return match stream.poll_flush() {
+                Ok(Async::Ready(_)) => Ok(Async::Ready(())),
+                _ => Ok(Async::NotReady)
+            };
+        }
+
+        println!("not ready to complete send");
+        Ok(Async::NotReady)
     }
 
     #[inline]
@@ -91,21 +90,32 @@ impl<S> Stream for FullCodec<S>
         S: AsyncRead + AsyncWrite + Send,
 {
     type Item = Vec<u8>;
-    type Error = IoError;
+    type Error = io::Error;
 
     #[inline]
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        println!("reading tls...");
+        println!("starting to read...");
         let mut plaintext = Vec::new();
-        if let Some(ref mut stream) = self.as_server_stream() {
-            let n = stream.read_to_end(&mut plaintext).unwrap();
-            println!("read {}", n);
-        } else if let Some(ref mut stream) = self.as_client_stream() {
-            let n = stream.read_to_end(&mut plaintext).unwrap();
-            println!("read {}", n);
+        if let Some(ref mut stream) = self.server_stream {
+            return match stream.poll_read(&mut plaintext) {
+                Ok(Async::Ready(0)) => Ok(Async::NotReady),
+                Ok(Async::Ready(_)) => Ok(Async::Ready(Some(plaintext))),
+                _ => {
+                    println!("not ready to read");
+                    Ok(Async::NotReady)
+                }
+            };
+        } else if let Some(ref mut stream) = self.client_stream {
+            return match stream.poll_read(&mut plaintext) {
+                Ok(Async::Ready(0)) => Ok(Async::NotReady),
+                Ok(Async::Ready(_)) => Ok(Async::Ready(Some(plaintext))),
+                _ => {
+                    println!("not ready to read");
+                    Ok(Async::NotReady)
+                }
+            };
         }
-        Ok(Async::Ready(Some(plaintext)))
+
+        Ok(Async::NotReady)
     }
 }
-
-
