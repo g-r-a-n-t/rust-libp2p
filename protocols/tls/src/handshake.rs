@@ -1,6 +1,5 @@
 use futures::*;
-use crate::codec::{FullCodec};
-use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_io::{AsyncRead, AsyncWrite,codec::length_delimited};
 use crate::error::TlsError;
 use crate::{TlsConfig};
 use libp2p_core::{PublicKey, Negotiated};
@@ -11,7 +10,7 @@ use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 use std::error::Error;
 use futures::future::Either;
 
-pub fn handshake<S>(mut socket: S, config: TlsConfig) -> impl Future<Item = (FullCodec<S>, PublicKey), Error = IoError>
+pub fn handshake<S>(mut socket: S, config: TlsConfig) -> impl Future<Item = (length_delimited::Framed<impl S>, PublicKey), Error = IoError>
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
 {
@@ -71,18 +70,18 @@ pub fn handshake<S>(mut socket: S, config: TlsConfig) -> impl Future<Item = (Ful
         (vec![rustls::Certificate(certif_gen.to_der().unwrap())], rustls::PrivateKey(pkey_bytes))
     };
 
-    struct DummyVerifier;//(Mutex<Option<PeerId>>);
-impl rustls::ServerCertVerifier for DummyVerifier {
-    fn verify_server_cert(&self,
-                          _: &rustls::RootCertStore,
-                          certs: &[rustls::Certificate],
-                          _: webpki::DNSNameRef,
-                          _ocsp_response: &[u8]) -> Result<rustls::ServerCertVerified, rustls::TLSError>
-    {
-        println!("blocks: {:?}", simple_asn1::from_der(&certs[0].0));
-        Ok(rustls::ServerCertVerified::assertion())
+    struct DummyVerifier;
+    impl rustls::ServerCertVerifier for DummyVerifier {
+        fn verify_server_cert(&self,
+                              _: &rustls::RootCertStore,
+                              certs: &[rustls::Certificate],
+                              _: webpki::DNSNameRef,
+                              _ocsp_response: &[u8]) -> Result<rustls::ServerCertVerified, rustls::TLSError>
+        {
+            println!("blocks: {:?}", simple_asn1::from_der(&certs[0].0));
+            Ok(rustls::ServerCertVerified::assertion())
+        }
     }
-}
 
     let _1 = String::from("1");
     match std::env::var("SERVER") {
@@ -92,7 +91,11 @@ impl rustls::ServerCertVerifier for DummyVerifier {
             server_config.set_single_cert(certificates.clone(), private_key.clone()).expect("bad certificates/private key");
             let acceptor = TlsAcceptor::from(Arc::new(server_config));
             Either::A(acceptor.accept(socket).and_then(|server_stream| {
-                Ok(FullCodec::from_server(Box::new(server_stream)))
+                let f = length_delimited::Builder::new()
+                    .big_endian()
+                    .length_field_length(4)
+                    .new_framed(server_stream);
+                Ok(f)
             }))
         },
         _ => {
@@ -102,10 +105,14 @@ impl rustls::ServerCertVerifier for DummyVerifier {
             let libp2p_io = webpki::DNSNameRef::try_from_ascii_str("libp2p.io").unwrap();
             let connector = TlsConnector::from(Arc::new(client_config));
             Either::B(connector.connect(libp2p_io, socket).and_then(|client_stream| {
-                Ok(FullCodec::from_client(Box::new(client_stream)))
+                let f = length_delimited::Builder::new()
+                    .big_endian()
+                    .length_field_length(4)
+                    .new_framed(client_stream);
+                Ok(f)
             }))
         }
-    }.and_then(move |codec: FullCodec<S>| {
+    }.and_then(move |codec| {
         codec.send(config.key.public().into_protobuf_encoding())
             .from_err()
             .and_then(|s| {

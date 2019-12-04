@@ -6,18 +6,16 @@ pub use self::error::TlsError;
 
 use bytes::BytesMut;
 use futures::stream::MapErr as StreamMapErr;
-use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_io::{AsyncRead, AsyncWrite,codec::length_delimited};
 use log::debug;
 use libp2p_core::{Keypair, PublicKey, identity, upgrade::{UpgradeInfo, InboundUpgrade, OutboundUpgrade, Negotiated}};
 use futures::{Future, Poll, Sink, StartSend, Stream, Async};
 use rw_stream_sink::RwStreamSink;
 use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 use std::iter;
-use tokio_io::codec::length_delimited;
-use crate::codec::FullCodec;
+use tokio_rustls::{server, client};
 
 mod error;
-mod codec;
 mod handshake;
 
 /// Implementation of the `ConnectionUpgrade` trait of `libp2p_core`. Automatically applies
@@ -89,13 +87,23 @@ where
     }
 }
 
-/// Output of the tls protocol.
-pub struct TlsOutput<S>
+/// Output of the inbound tls protocol.
+pub struct TlsInboundOutput<S>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     /// The encrypted stream.
-    pub stream: RwStreamSink<StreamMapErr<TlsMiddleware<S>, fn(IoError) -> IoError>>,
+    pub stream: server::TlsStream<Negotiated<S>>,
+    pub remote_key: PublicKey,
+}
+
+/// Output of the ibound tls protocol.
+pub struct TlsOutboundOutput<S>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    /// The encrypted stream.
+    pub stream: client::TlsStream<Negotiated<S>>,
     pub remote_key: PublicKey,
 }
 
@@ -109,7 +117,7 @@ pub struct TlsMiddleware<S>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    inner: codec::FullCodec<S>,
+    inner: length_delimited::Framed<S>,
 }
 
 impl<S> TlsMiddleware<S>
