@@ -23,7 +23,7 @@ log = "0.4"
 multiaddr = { version = "0.13.0" }
 multihash = { version = "0.14", default-features = false, features = ["std", "multihash-impl", "identity", "sha2"] }
 multistream-select = { version = "0.10", path = "../misc/multistream-select" }
-parking_lot = "0.11.0"
+parking_lot = "0.12.1"
 pin-project = "1.0.0"
 prost = "0.8"
 rand = "0.7"
