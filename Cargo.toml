@@ -87,7 +87,7 @@ libp2p-swarm-derive = { version = "0.25.0", path = "swarm-derive" }
 libp2p-uds = { version = "0.30.0", path = "transports/uds", optional = true }
 libp2p-wasm-ext = { version = "0.30.0", path = "transports/wasm-ext", default-features = false, optional = true }
 libp2p-yamux = { version = "0.34.0", path = "muxers/yamux", optional = true }
-multiaddr = { version = "0.13.0" }
+multiaddr = { version = "0.16.0" }
 parking_lot = "0.11.0"
 pin-project = "1.0.0"
 smallvec = "1.6.1"
