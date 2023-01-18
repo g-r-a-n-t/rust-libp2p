@@ -1,4 +1,136 @@
-# 0.32.0 [unreleased]
+# 0.43.0 [unreleased]
+
+- Update to `libp2p-core` `v0.39.0`.
+
+- Require the node's local `PeerId` to be passed into the constructor of `libp2p_mdns::Behaviour`. See [PR 3153].
+
+- Update to `libp2p-swarm` `v0.42.0`.
+
+[PR 3153]: https://github.com/libp2p/rust-libp2p/pull/3153
+
+# 0.42.0
+
+- Update to `libp2p-core` `v0.38.0`.
+
+- Update to `libp2p-swarm` `v0.41.0`.
+
+- Update to `if-watch` `3.0.0` and both rename `TokioMdns` to `Behaviour` living in `tokio::Behaviour`,
+and move and rename `Mdns` to `async_io::Behaviour`. See [PR 3096].
+
+- Remove the remaning `Mdns` prefixes from types as per [discussion 2174].
+  I.e the `Mdns` prefix has been removed from various types like `MdnsEvent`.
+  Users should prefer importing the mdns protocol as a module (`use libp2p::mdns;`),
+  and refer to its types via `mdns::`. For example: `mdns::Behaviour` or `mdns::Event`.
+
+- Replace `GenMdns`'s `NetworkBehaviour` implemention `inject_*` methods with the new `on_*` methods.
+  See [PR 3011].
+
+- Use `trust-dns-proto` to parse DNS messages. See [PR 3102].
+
+- Update `rust-version` to reflect the actual MSRV: 1.62.0. See [PR 3090].
+
+[discussion 2174]: https://github.com/libp2p/rust-libp2p/discussions/2174
+[PR 3096]: https://github.com/libp2p/rust-libp2p/pull/3096
+[PR 3011]: https://github.com/libp2p/rust-libp2p/pull/3011
+[PR 3102]: https://github.com/libp2p/rust-libp2p/pull/3102
+[PR 3090]: https://github.com/libp2p/rust-libp2p/pull/3090
+
+# 0.41.0
+
+- Remove default features. If you previously depended on `async-io` you need to enable this explicitly now. See [PR 2918].
+
+- Update to `libp2p-core` `v0.37.0`.
+
+- Update to `libp2p-swarm` `v0.40.0`.
+
+- Fix a bug that could cause a delay of ~10s until peers would get discovered when using the tokio runtime. See [PR 2939].
+
+- Removed the `lazy_static` dependency. See [PR 2977].
+
+- Update to `if-watch` `v2.0.0` and thus the `async` method `Mdns::new` and `TokioMdns::new` becomes synchronous. See [PR 2978].
+
+[PR 2918]: https://github.com/libp2p/rust-libp2p/pull/2918
+[PR 2939]: https://github.com/libp2p/rust-libp2p/pull/2939
+[PR 2977]: https://github.com/libp2p/rust-libp2p/pull/2977
+[PR 2978]: https://github.com/libp2p/rust-libp2p/pull/2978
+
+# 0.40.0
+
+- Update to `libp2p-swarm` `v0.39.0`.
+
+- Allow users to choose between async-io and tokio runtime
+  in the mdns protocol implementation. `async-io` is a default
+  feature, with an additional `tokio` feature  (see [PR 2748])
+
+- Fix high CPU usage with Tokio library (see [PR 2748]).
+
+- Update to `libp2p-core` `v0.36.0`.
+
+[PR 2748]: https://github.com/libp2p/rust-libp2p/pull/2748
+
+# 0.39.0
+
+- Update to `libp2p-swarm` `v0.38.0`.
+- Update to `if-watch` `v1.1.1`.
+
+- Update to `libp2p-core` `v0.35.0`.
+
+# 0.38.0
+
+- Update to `libp2p-core` `v0.34.0`.
+
+- Update to `libp2p-swarm` `v0.37.0`.
+
+# 0.37.0
+
+- Update to `libp2p-core` `v0.33.0`.
+
+- Update to `libp2p-swarm` `v0.36.0`.
+
+# 0.36.0
+
+- Update to `libp2p-swarm` `v0.35.0`.
+
+# 0.35.0 [2022-02-22]
+
+- Update to `libp2p-core` `v0.32.0`.
+
+- Update to `libp2p-swarm` `v0.34.0`.
+
+- Merge NetworkBehaviour's inject_\* paired methods (see PR 2445).
+
+[PR 2445]: https://github.com/libp2p/rust-libp2p/pull/2445
+
+# 0.34.0 [2022-01-27]
+
+- Update dependencies.
+
+- Use a random alphanumeric string instead of the local peer ID for mDNS peer
+  name (see [PR 2311]).
+
+  Note that previous versions of `libp2p-mdns` expect the peer name to be a
+  valid peer ID. Thus they will be unable to discover nodes running this new
+  version of `libp2p-mdns`.
+
+- Migrate to Rust edition 2021 (see [PR 2339]).
+
+- Fix generation of peer expiration event and listen on specified IP version (see [PR 2359]).
+
+- Support multiple interfaces (see [PR 2383]).
+
+[PR 2339]: https://github.com/libp2p/rust-libp2p/pull/2339
+
+[PR 2311]: https://github.com/libp2p/rust-libp2p/pull/2311/
+
+[PR 2359]: https://github.com/libp2p/rust-libp2p/pull/2359
+
+[PR 2383]: https://github.com/libp2p/rust-libp2p/pull/2383
+
+# 0.33.0 [2021-11-16]
+
+- Update dependencies.
+
+# 0.32.0 [2021-11-01]
 
 - Make default features of `libp2p-core` optional.
   [PR 2181](https://github.com/libp2p/rust-libp2p/pull/2181)

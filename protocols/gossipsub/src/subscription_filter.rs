@@ -50,7 +50,7 @@ pub trait TopicSubscriptionFilter {
             }
         }
         self.filter_incoming_subscription_set(
-            filtered_subscriptions.into_iter().map(|(_, v)| v).collect(),
+            filtered_subscriptions.into_values().collect(),
             currently_subscribed_topics,
         )
     }
@@ -232,15 +232,15 @@ pub mod regex {
             let subscriptions = vec![
                 GossipsubSubscription {
                     action: Subscribe,
-                    topic_hash: t1.clone(),
+                    topic_hash: t1,
                 },
                 GossipsubSubscription {
                     action: Subscribe,
-                    topic_hash: t2.clone(),
+                    topic_hash: t2,
                 },
                 GossipsubSubscription {
                     action: Subscribe,
-                    topic_hash: t3.clone(),
+                    topic_hash: t3,
                 },
             ];
 
@@ -277,7 +277,7 @@ mod test {
             },
             GossipsubSubscription {
                 action: Subscribe,
-                topic_hash: t2.clone(),
+                topic_hash: t2,
             },
             GossipsubSubscription {
                 action: Subscribe,
@@ -285,7 +285,7 @@ mod test {
             },
             GossipsubSubscription {
                 action: Unsubscribe,
-                topic_hash: t1.clone(),
+                topic_hash: t1,
             },
         ];
 
@@ -306,11 +306,11 @@ mod test {
         let subscriptions = vec![
             GossipsubSubscription {
                 action: Subscribe,
-                topic_hash: t1.clone(),
+                topic_hash: t1,
             },
             GossipsubSubscription {
                 action: Subscribe,
-                topic_hash: t2.clone(),
+                topic_hash: t2,
             },
         ];
 
@@ -343,7 +343,7 @@ mod test {
             },
             GossipsubSubscription {
                 action: Subscribe,
-                topic_hash: t1.clone(),
+                topic_hash: t1,
             },
         ];
 
@@ -354,7 +354,7 @@ mod test {
     #[test]
     fn test_filter_incoming_too_many_subscriptions() {
         let t: Vec<_> = (0..4)
-            .map(|i| TopicHash::from_raw(format!("t{}", i)))
+            .map(|i| TopicHash::from_raw(format!("t{i}")))
             .collect();
 
         let mut filter = MaxCountSubscriptionFilter {
@@ -383,7 +383,7 @@ mod test {
     #[test]
     fn test_filter_incoming_max_subscribed_valid() {
         let t: Vec<_> = (0..5)
-            .map(|i| TopicHash::from_raw(format!("t{}", i)))
+            .map(|i| TopicHash::from_raw(format!("t{i}")))
             .collect();
 
         let mut filter = MaxCountSubscriptionFilter {
@@ -434,11 +434,11 @@ mod test {
         let subscriptions = vec![
             GossipsubSubscription {
                 action: Subscribe,
-                topic_hash: t1.clone(),
+                topic_hash: t1,
             },
             GossipsubSubscription {
                 action: Subscribe,
-                topic_hash: t2.clone(),
+                topic_hash: t2,
             },
         ];
 

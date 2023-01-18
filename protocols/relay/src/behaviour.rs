@@ -1,4 +1,4 @@
-// Copyright 2019 Parity Technologies (UK) Ltd.
+// Copyright 2021 Protocol Labs.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
 // copy of this software and associated documentation files (the "Software"),
@@ -18,797 +18,775 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::handler::{RelayHandlerConfig, RelayHandlerEvent, RelayHandlerIn, RelayHandlerProto};
-use crate::message_proto::circuit_relay;
-use crate::protocol;
-use crate::transport::TransportToBehaviourMsg;
-use crate::RequestId;
-use futures::channel::{mpsc, oneshot};
-use futures::prelude::*;
-use libp2p_core::connection::{ConnectedPoint, ConnectionId, ListenerId};
-use libp2p_core::multiaddr::Multiaddr;
+//! [`NetworkBehaviour`] to act as a circuit relay v2 **relay**.
+
+mod handler;
+pub mod rate_limiter;
+
+use crate::message_proto;
+use crate::protocol::{inbound_hop, outbound_stop};
+use either::Either;
+use instant::Instant;
+use libp2p_core::multiaddr::Protocol;
 use libp2p_core::PeerId;
+use libp2p_swarm::behaviour::{ConnectionClosed, FromSwarm};
 use libp2p_swarm::{
-    DialError, DialPeerCondition, IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction,
-    NotifyHandler, PollParameters,
+    ConnectionHandlerUpgrErr, ConnectionId, ExternalAddresses, NetworkBehaviour,
+    NetworkBehaviourAction, NotifyHandler, PollParameters,
 };
-use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
+use std::collections::{hash_map, HashMap, HashSet, VecDeque};
+use std::num::NonZeroU32;
+use std::ops::Add;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-/// Network behaviour allowing the local node to act as a source, a relay and a destination.
-pub struct Relay {
-    config: RelayConfig,
-    /// Channel receiver from [`crate::RelayTransport`].
-    from_transport: mpsc::Receiver<TransportToBehaviourMsg>,
+/// Configuration for the relay [`Behaviour`].
+///
+/// # Panics
+///
+/// [`Config::max_circuit_duration`] may not exceed [`u32::MAX`].
+pub struct Config {
+    pub max_reservations: usize,
+    pub max_reservations_per_peer: usize,
+    pub reservation_duration: Duration,
+    pub reservation_rate_limiters: Vec<Box<dyn rate_limiter::RateLimiter>>,
 
-    /// Events that need to be send to a [`RelayListener`](crate::transport::RelayListener) via
-    /// [`Self::listeners`] or [`Self::listener_any_relay`].
-    outbox_to_listeners: VecDeque<(PeerId, BehaviourToListenerMsg)>,
-    /// Events that need to be yielded to the outside when polling.
-    outbox_to_swarm: VecDeque<NetworkBehaviourAction<(), RelayHandlerProto>>,
-
-    /// List of peers the network is connected to.
-    connected_peers: HashMap<PeerId, HashSet<ConnectionId>>,
-
-    /// Requests by the local node to a relay to relay a connection for the local node to a
-    /// destination.
-    outgoing_relay_reqs: OutgoingRelayReqs,
-
-    /// Requests for the local node to act as a relay from a source to a destination indexed by
-    /// destination [`PeerId`].
-    incoming_relay_reqs: HashMap<PeerId, Vec<IncomingRelayReq>>,
-
-    /// List of relay nodes via which the local node is explicitly listening for incoming relayed
-    /// connections.
-    ///
-    /// Indexed by relay [`PeerId`]. Contains channel sender to listener.
-    listeners: HashMap<PeerId, RelayListener>,
-
-    /// Channel sender to listener listening for incoming relayed connections from relay nodes via
-    /// which the local node is not explicitly listening.
-    listener_any_relay: Option<mpsc::Sender<BehaviourToListenerMsg>>,
+    pub max_circuits: usize,
+    pub max_circuits_per_peer: usize,
+    pub max_circuit_duration: Duration,
+    pub max_circuit_bytes: u64,
+    pub circuit_src_rate_limiters: Vec<Box<dyn rate_limiter::RateLimiter>>,
 }
 
-#[derive(Default)]
-struct OutgoingRelayReqs {
-    /// Indexed by relay peer id.
-    dialing: HashMap<PeerId, Vec<OutgoingDialingRelayReq>>,
-    upgrading: HashMap<RequestId, OutgoingUpgradingRelayReq>,
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("max_reservations", &self.max_reservations)
+            .field("max_reservations_per_peer", &self.max_reservations_per_peer)
+            .field("reservation_duration", &self.reservation_duration)
+            .field(
+                "reservation_rate_limiters",
+                &format!("[{} rate limiters]", self.reservation_rate_limiters.len()),
+            )
+            .field("max_circuits", &self.max_circuits)
+            .field("max_circuits_per_peer", &self.max_circuits_per_peer)
+            .field("max_circuit_duration", &self.max_circuit_duration)
+            .field("max_circuit_bytes", &self.max_circuit_bytes)
+            .field(
+                "circuit_src_rate_limiters",
+                &format!("[{} rate limiters]", self.circuit_src_rate_limiters.len()),
+            )
+            .finish()
+    }
 }
 
-struct OutgoingDialingRelayReq {
-    request_id: RequestId,
-    src_peer_id: PeerId,
-    relay_addr: Multiaddr,
-    dst_addr: Option<Multiaddr>,
-    dst_peer_id: PeerId,
-    send_back: oneshot::Sender<Result<protocol::Connection, OutgoingRelayReqError>>,
+impl Default for Config {
+    fn default() -> Self {
+        let reservation_rate_limiters = vec![
+            // For each peer ID one reservation every 2 minutes with up to 30 reservations per hour.
+            rate_limiter::new_per_peer(rate_limiter::GenericRateLimiterConfig {
+                limit: NonZeroU32::new(30).expect("30 > 0"),
+                interval: Duration::from_secs(60 * 2),
+            }),
+            // For each IP address one reservation every minute with up to 60 reservations per hour.
+            rate_limiter::new_per_ip(rate_limiter::GenericRateLimiterConfig {
+                limit: NonZeroU32::new(60).expect("60 > 0"),
+                interval: Duration::from_secs(60),
+            }),
+        ];
+
+        let circuit_src_rate_limiters = vec![
+            // For each source peer ID one circuit every 2 minute with up to 30 circuits per hour.
+            rate_limiter::new_per_peer(rate_limiter::GenericRateLimiterConfig {
+                limit: NonZeroU32::new(30).expect("30 > 0"),
+                interval: Duration::from_secs(60 * 2),
+            }),
+            // For each source IP address one circuit every minute with up to 60 circuits per hour.
+            rate_limiter::new_per_ip(rate_limiter::GenericRateLimiterConfig {
+                limit: NonZeroU32::new(60).expect("60 > 0"),
+                interval: Duration::from_secs(60),
+            }),
+        ];
+
+        Config {
+            max_reservations: 128,
+            max_reservations_per_peer: 4,
+            reservation_duration: Duration::from_secs(60 * 60),
+            reservation_rate_limiters,
+
+            max_circuits: 16,
+            max_circuits_per_peer: 4,
+            max_circuit_duration: Duration::from_secs(2 * 60),
+            max_circuit_bytes: 1 << 17, // 128 kibibyte
+            circuit_src_rate_limiters,
+        }
+    }
 }
 
-struct OutgoingUpgradingRelayReq {
-    send_back: oneshot::Sender<Result<protocol::Connection, OutgoingRelayReqError>>,
-}
-
-enum IncomingRelayReq {
-    DialingDst {
+/// The events produced by the relay `Behaviour`.
+#[derive(Debug)]
+pub enum Event {
+    /// An inbound reservation request has been accepted.
+    ReservationReqAccepted {
         src_peer_id: PeerId,
-        src_addr: Multiaddr,
-        src_connection_id: ConnectionId,
-        request_id: RequestId,
-        incoming_relay_req: protocol::IncomingRelayReq,
+        /// Indicates whether the request replaces an existing reservation.
+        renewed: bool,
+    },
+    /// Accepting an inbound reservation request failed.
+    ReservationReqAcceptFailed {
+        src_peer_id: PeerId,
+        error: inbound_hop::UpgradeError,
+    },
+    /// An inbound reservation request has been denied.
+    ReservationReqDenied { src_peer_id: PeerId },
+    /// Denying an inbound reservation request has failed.
+    ReservationReqDenyFailed {
+        src_peer_id: PeerId,
+        error: inbound_hop::UpgradeError,
+    },
+    /// An inbound reservation has timed out.
+    ReservationTimedOut { src_peer_id: PeerId },
+    CircuitReqReceiveFailed {
+        src_peer_id: PeerId,
+        error: ConnectionHandlerUpgrErr<void::Void>,
+    },
+    /// An inbound circuit request has been denied.
+    CircuitReqDenied {
+        src_peer_id: PeerId,
+        dst_peer_id: PeerId,
+    },
+    /// Denying an inbound circuit request failed.
+    CircuitReqDenyFailed {
+        src_peer_id: PeerId,
+        dst_peer_id: PeerId,
+        error: inbound_hop::UpgradeError,
+    },
+    /// An inbound cirucit request has been accepted.
+    CircuitReqAccepted {
+        src_peer_id: PeerId,
+        dst_peer_id: PeerId,
+    },
+    /// An outbound connect for an inbound cirucit request failed.
+    CircuitReqOutboundConnectFailed {
+        src_peer_id: PeerId,
+        dst_peer_id: PeerId,
+        error: ConnectionHandlerUpgrErr<outbound_stop::CircuitFailedReason>,
+    },
+    /// Accepting an inbound circuit request failed.
+    CircuitReqAcceptFailed {
+        src_peer_id: PeerId,
+        dst_peer_id: PeerId,
+        error: inbound_hop::UpgradeError,
+    },
+    /// An inbound circuit has closed.
+    CircuitClosed {
+        src_peer_id: PeerId,
+        dst_peer_id: PeerId,
+        error: Option<std::io::Error>,
     },
 }
 
-#[derive(Debug)]
-pub struct RelayConfig {
-    /// How long to keep connections alive when they're idle.
-    ///
-    /// For a server, acting as a relay, allowing other nodes to listen for
-    /// incoming connections via oneself, this should likely be increased in
-    /// order not to force the peer to reconnect too regularly.
-    pub connection_idle_timeout: Duration,
-    /// Whether to actively establish an outgoing connection to a destination
-    /// node, when being asked by a source node to relay a connection to said
-    /// destination node.
-    ///
-    /// For security reasons this behaviour is disabled by default. Instead a
-    /// destination node should establish a connection to a relay node before
-    /// advertising their relayed address via that relay node to a source node.
-    pub actively_connect_to_dst_nodes: bool,
+/// [`NetworkBehaviour`] implementation of the relay server
+/// functionality of the circuit relay v2 protocol.
+pub struct Behaviour {
+    config: Config,
+
+    local_peer_id: PeerId,
+
+    reservations: HashMap<PeerId, HashSet<ConnectionId>>,
+    circuits: CircuitsTracker,
+
+    /// Queue of actions to return when polled.
+    queued_actions: VecDeque<Action>,
+
+    external_addresses: ExternalAddresses,
 }
 
-impl Default for RelayConfig {
-    fn default() -> Self {
-        RelayConfig {
-            connection_idle_timeout: Duration::from_secs(10),
-            actively_connect_to_dst_nodes: false,
-        }
-    }
-}
-
-// TODO: For now one is only able to specify relay servers via
-// `Swarm::listen_on(Multiaddress(<relay_server>/p2p-circuit/))`. In the future
-// we might want to support adding them via the Relay behaviour? The latter
-// would allow other behaviours to manage ones relay listeners.
-impl Relay {
-    /// Builds a new [`Relay`] [`NetworkBehaviour`].
-    pub(crate) fn new(
-        config: RelayConfig,
-        from_transport: mpsc::Receiver<TransportToBehaviourMsg>,
-    ) -> Self {
-        Relay {
+impl Behaviour {
+    pub fn new(local_peer_id: PeerId, config: Config) -> Self {
+        Self {
             config,
-            from_transport,
-            outbox_to_listeners: Default::default(),
-            outbox_to_swarm: Default::default(),
-            connected_peers: Default::default(),
-            incoming_relay_reqs: Default::default(),
-            outgoing_relay_reqs: Default::default(),
-            listeners: Default::default(),
-            listener_any_relay: Default::default(),
+            local_peer_id,
+            reservations: Default::default(),
+            circuits: Default::default(),
+            queued_actions: Default::default(),
+            external_addresses: Default::default(),
+        }
+    }
+
+    fn on_connection_closed(
+        &mut self,
+        ConnectionClosed {
+            peer_id,
+            connection_id,
+            ..
+        }: ConnectionClosed<<Self as NetworkBehaviour>::ConnectionHandler>,
+    ) {
+        if let hash_map::Entry::Occupied(mut peer) = self.reservations.entry(peer_id) {
+            peer.get_mut().remove(&connection_id);
+            if peer.get().is_empty() {
+                peer.remove();
+            }
+        }
+
+        for circuit in self
+            .circuits
+            .remove_by_connection(peer_id, connection_id)
+            .iter()
+            // Only emit [`CircuitClosed`] for accepted requests.
+            .filter(|c| matches!(c.status, CircuitStatus::Accepted))
+        {
+            self.queued_actions.push_back(
+                NetworkBehaviourAction::GenerateEvent(Event::CircuitClosed {
+                    src_peer_id: circuit.src_peer_id,
+                    dst_peer_id: circuit.dst_peer_id,
+                    error: Some(std::io::ErrorKind::ConnectionAborted.into()),
+                })
+                .into(),
+            );
         }
     }
 }
 
-impl NetworkBehaviour for Relay {
-    type ProtocolsHandler = RelayHandlerProto;
-    type OutEvent = ();
+impl NetworkBehaviour for Behaviour {
+    type ConnectionHandler = handler::Prototype;
+    type OutEvent = Event;
 
-    fn new_handler(&mut self) -> Self::ProtocolsHandler {
-        RelayHandlerProto {
-            config: RelayHandlerConfig {
-                connection_idle_timeout: self.config.connection_idle_timeout,
+    fn new_handler(&mut self) -> Self::ConnectionHandler {
+        handler::Prototype {
+            config: handler::Config {
+                reservation_duration: self.config.reservation_duration,
+                max_circuit_duration: self.config.max_circuit_duration,
+                max_circuit_bytes: self.config.max_circuit_bytes,
             },
         }
     }
 
-    fn addresses_of_peer(&mut self, remote_peer_id: &PeerId) -> Vec<Multiaddr> {
-        self.listeners
-            .iter()
-            .filter_map(|(peer_id, r)| {
-                if let RelayListener::Connecting { relay_addr, .. } = r {
-                    if peer_id == remote_peer_id {
-                        return Some(relay_addr.clone());
-                    }
-                }
-                None
-            })
-            .chain(
-                self.outgoing_relay_reqs
-                    .dialing
-                    .get(remote_peer_id)
-                    .into_iter()
-                    .flatten()
-                    .map(|OutgoingDialingRelayReq { relay_addr, .. }| relay_addr.clone()),
-            )
-            .chain(
-                self.incoming_relay_reqs
-                    .get(remote_peer_id)
-                    .into_iter()
-                    .flatten()
-                    .map(
-                        |IncomingRelayReq::DialingDst {
-                             incoming_relay_req, ..
-                         }| incoming_relay_req.dst_peer().addrs.clone(),
-                    )
-                    .flatten(),
-            )
-            .collect()
-    }
+    fn on_swarm_event(&mut self, event: FromSwarm<Self::ConnectionHandler>) {
+        self.external_addresses.on_swarm_event(&event);
 
-    fn inject_connection_established(
-        &mut self,
-        peer: &PeerId,
-        connection_id: &ConnectionId,
-        _: &ConnectedPoint,
-    ) {
-        let is_first = self
-            .connected_peers
-            .entry(*peer)
-            .or_default()
-            .insert(*connection_id);
-        assert!(
-            is_first,
-            "`inject_connection_established` called with known connection id"
-        );
-
-        if let Some(RelayListener::Connecting { .. }) = self.listeners.get(peer) {
-            self.outbox_to_swarm
-                .push_back(NetworkBehaviourAction::NotifyHandler {
-                    peer_id: *peer,
-                    handler: NotifyHandler::One(*connection_id),
-                    event: RelayHandlerIn::UsedForListening(true),
-                });
-            let mut to_listener = match self.listeners.remove(peer) {
-                None | Some(RelayListener::Connected { .. }) => unreachable!("See outer match."),
-                Some(RelayListener::Connecting { to_listener, .. }) => to_listener,
-            };
-            to_listener
-                .start_send(BehaviourToListenerMsg::ConnectionToRelayEstablished)
-                .expect("Channel to have at least capacity of 1.");
-            self.listeners.insert(
-                *peer,
-                RelayListener::Connected {
-                    connection_id: *connection_id,
-                    to_listener,
-                },
-            );
-        }
-    }
-
-    fn inject_connected(&mut self, peer_id: &PeerId) {
-        assert!(
-            self.connected_peers
-                .get(peer_id)
-                .map(|cs| !cs.is_empty())
-                .unwrap_or(false),
-            "Expect to be connected to peer with at least one connection."
-        );
-
-        if let Some(reqs) = self.outgoing_relay_reqs.dialing.remove(peer_id) {
-            for req in reqs {
-                let OutgoingDialingRelayReq {
-                    request_id,
-                    src_peer_id,
-                    relay_addr: _,
-                    dst_addr,
-                    dst_peer_id,
-                    send_back,
-                } = req;
-                self.outbox_to_swarm
-                    .push_back(NetworkBehaviourAction::NotifyHandler {
-                        peer_id: *peer_id,
-                        handler: NotifyHandler::Any,
-                        event: RelayHandlerIn::OutgoingRelayReq {
-                            src_peer_id,
-                            request_id,
-                            dst_peer_id,
-                            dst_addr: dst_addr.clone(),
-                        },
-                    });
-
-                self.outgoing_relay_reqs
-                    .upgrading
-                    .insert(request_id, OutgoingUpgradingRelayReq { send_back });
+        match event {
+            FromSwarm::ConnectionClosed(connection_closed) => {
+                self.on_connection_closed(connection_closed)
             }
-        }
-
-        // Ask the newly-opened connection to be used as destination if relevant.
-        if let Some(reqs) = self.incoming_relay_reqs.remove(peer_id) {
-            for req in reqs {
-                let IncomingRelayReq::DialingDst {
-                    src_peer_id,
-                    src_addr,
-                    src_connection_id,
-                    request_id,
-                    incoming_relay_req,
-                } = req;
-                let event = RelayHandlerIn::OutgoingDstReq {
-                    src_peer_id,
-                    src_addr,
-                    src_connection_id,
-                    request_id,
-                    incoming_relay_req,
-                };
-
-                self.outbox_to_swarm
-                    .push_back(NetworkBehaviourAction::NotifyHandler {
-                        peer_id: *peer_id,
-                        handler: NotifyHandler::Any,
-                        event,
-                    });
-            }
+            FromSwarm::ConnectionEstablished(_)
+            | FromSwarm::DialFailure(_)
+            | FromSwarm::AddressChange(_)
+            | FromSwarm::ListenFailure(_)
+            | FromSwarm::NewListener(_)
+            | FromSwarm::NewListenAddr(_)
+            | FromSwarm::ExpiredListenAddr(_)
+            | FromSwarm::ListenerError(_)
+            | FromSwarm::ListenerClosed(_)
+            | FromSwarm::NewExternalAddr(_)
+            | FromSwarm::ExpiredExternalAddr(_) => {}
         }
     }
 
-    fn inject_dial_failure(
-        &mut self,
-        peer_id: &PeerId,
-        _: Self::ProtocolsHandler,
-        error: DialError,
-    ) {
-        if let DialError::DialPeerConditionFalse(
-            DialPeerCondition::Disconnected | DialPeerCondition::NotDialing,
-        ) = error
-        {
-            // Return early. The dial, that this dial was canceled for, might still succeed.
-            return;
-        }
-
-        if let Entry::Occupied(o) = self.listeners.entry(*peer_id) {
-            if matches!(o.get(), RelayListener::Connecting { .. }) {
-                // By removing the entry, the channel to the listener is dropped and thus the
-                // listener is notified that dialing the relay failed.
-                o.remove_entry();
-            }
-        }
-
-        if let Some(reqs) = self.outgoing_relay_reqs.dialing.remove(peer_id) {
-            for req in reqs {
-                let _ = req.send_back.send(Err(OutgoingRelayReqError::DialingRelay));
-            }
-        }
-
-        if let Some(reqs) = self.incoming_relay_reqs.remove(peer_id) {
-            for req in reqs {
-                let IncomingRelayReq::DialingDst {
-                    src_peer_id,
-                    incoming_relay_req,
-                    ..
-                } = req;
-                self.outbox_to_swarm
-                    .push_back(NetworkBehaviourAction::NotifyHandler {
-                        peer_id: src_peer_id,
-                        handler: NotifyHandler::Any,
-                        event: RelayHandlerIn::DenyIncomingRelayReq(
-                            incoming_relay_req.deny(circuit_relay::Status::HopCantDialDst),
-                        ),
-                    })
-            }
-        }
-    }
-
-    fn inject_connection_closed(
-        &mut self,
-        peer: &PeerId,
-        connection: &ConnectionId,
-        _: &ConnectedPoint,
-        _: <Self::ProtocolsHandler as IntoProtocolsHandler>::Handler,
-    ) {
-        // Remove connection from the set of connections for the given peer. In case the set is
-        // empty it will be removed in `inject_disconnected`.
-        let was_present = self
-            .connected_peers
-            .get_mut(peer)
-            .expect("`inject_connection_closed` called for connected peer.")
-            .remove(connection);
-        assert!(
-            was_present,
-            "`inject_connection_closed` called for known connection"
-        );
-
-        match self.listeners.get(peer) {
-            None => {}
-            Some(RelayListener::Connecting { .. }) => unreachable!(
-                "State mismatch. Listener waiting for connection while \
-                 connection previously established.",
-            ),
-            Some(RelayListener::Connected { connection_id, .. }) => {
-                if connection_id == connection {
-                    if let Some(new_primary) = self
-                        .connected_peers
-                        .get(peer)
-                        .and_then(|cs| cs.iter().next())
-                    {
-                        let to_listener = match self.listeners.remove(peer) {
-                            None | Some(RelayListener::Connecting { .. }) => {
-                                unreachable!("Due to outer match.")
-                            }
-                            Some(RelayListener::Connected { to_listener, .. }) => to_listener,
-                        };
-                        self.listeners.insert(
-                            *peer,
-                            RelayListener::Connected {
-                                connection_id: *new_primary,
-                                to_listener,
-                            },
-                        );
-                        self.outbox_to_swarm
-                            .push_back(NetworkBehaviourAction::NotifyHandler {
-                                peer_id: *peer,
-                                handler: NotifyHandler::One(*new_primary),
-                                event: RelayHandlerIn::UsedForListening(true),
-                            });
-                    } else {
-                        // There are no more connections to the relay left that
-                        // could be promoted as primary. Remove the listener,
-                        // notifying the listener by dropping the channel to it.
-                        self.listeners.remove(peer);
-                    }
-                }
-            }
-        }
-    }
-
-    fn inject_addr_reach_failure(
-        &mut self,
-        _peer_id: Option<&PeerId>,
-        _addr: &Multiaddr,
-        _error: &dyn std::error::Error,
-    ) {
-        // Handled in `inject_dial_failure`.
-    }
-
-    fn inject_listener_error(&mut self, _id: ListenerId, _err: &(dyn std::error::Error + 'static)) {
-    }
-
-    fn inject_listener_closed(&mut self, _id: ListenerId, _reason: Result<(), &std::io::Error>) {}
-
-    fn inject_disconnected(&mut self, id: &PeerId) {
-        self.connected_peers.remove(id);
-
-        if let Some(reqs) = self.incoming_relay_reqs.remove(id) {
-            for req in reqs {
-                let IncomingRelayReq::DialingDst {
-                    src_peer_id,
-                    incoming_relay_req,
-                    ..
-                } = req;
-                self.outbox_to_swarm
-                    .push_back(NetworkBehaviourAction::NotifyHandler {
-                        peer_id: src_peer_id,
-                        handler: NotifyHandler::Any,
-                        event: RelayHandlerIn::DenyIncomingRelayReq(
-                            incoming_relay_req.deny(circuit_relay::Status::HopCantDialDst),
-                        ),
-                    })
-            }
-        }
-    }
-
-    fn inject_event(
+    fn on_connection_handler_event(
         &mut self,
         event_source: PeerId,
         connection: ConnectionId,
-        event: RelayHandlerEvent,
+        event: Either<handler::Event, void::Void>,
     ) {
-        match event {
-            // Remote wants us to become a relay.
-            RelayHandlerEvent::IncomingRelayReq {
-                request_id,
-                src_addr,
-                req,
-            } => {
-                if self.connected_peers.get(&req.dst_peer().peer_id).is_some() {
-                    let dest_id = req.dst_peer().peer_id;
-                    let event = RelayHandlerIn::OutgoingDstReq {
-                        src_peer_id: event_source,
-                        src_addr,
-                        src_connection_id: connection,
-                        request_id,
-                        incoming_relay_req: req,
-                    };
-                    self.outbox_to_swarm
-                        .push_back(NetworkBehaviourAction::NotifyHandler {
-                            peer_id: dest_id,
-                            handler: NotifyHandler::Any,
-                            event,
-                        });
-                } else {
-                    if self.config.actively_connect_to_dst_nodes {
-                        let dest_id = req.dst_peer().peer_id;
-                        self.incoming_relay_reqs.entry(dest_id).or_default().push(
-                            IncomingRelayReq::DialingDst {
-                                request_id,
-                                incoming_relay_req: req,
-                                src_peer_id: event_source,
-                                src_addr,
-                                src_connection_id: connection,
-                            },
-                        );
-                        let handler = self.new_handler();
-                        self.outbox_to_swarm
-                            .push_back(NetworkBehaviourAction::DialPeer {
-                                peer_id: dest_id,
-                                condition: DialPeerCondition::NotDialing,
-                                handler,
-                            });
-                    } else {
-                        self.outbox_to_swarm
-                            .push_back(NetworkBehaviourAction::NotifyHandler {
-                                peer_id: event_source,
-                                handler: NotifyHandler::One(connection),
-                                event: RelayHandlerIn::DenyIncomingRelayReq(
-                                    req.deny(circuit_relay::Status::HopNoConnToDst),
-                                ),
-                            });
-                    }
-                }
-            }
-            // Remote wants us to become a destination.
-            RelayHandlerEvent::IncomingDstReq(request) => {
-                let got_explicit_listener = self
-                    .listeners
-                    .get(&event_source)
-                    .map(|l| !l.is_closed())
-                    .unwrap_or(false);
-                let got_listener_for_any_relay = self
-                    .listener_any_relay
-                    .as_mut()
-                    .map(|l| !l.is_closed())
-                    .unwrap_or(false);
+        let event = match event {
+            Either::Left(e) => e,
+            Either::Right(v) => void::unreachable(v),
+        };
 
-                let send_back = if got_explicit_listener || got_listener_for_any_relay {
-                    RelayHandlerIn::AcceptDstReq(request)
+        match event {
+            handler::Event::ReservationReqReceived {
+                inbound_reservation_req,
+                endpoint,
+                renewed,
+            } => {
+                let now = Instant::now();
+
+                assert!(
+                    !endpoint.is_relayed(),
+                    "`dummy::ConnectionHandler` handles relayed connections. It \
+                     denies all inbound substreams."
+                );
+
+                let action = if
+                // Deny if it is a new reservation and exceeds `max_reservations_per_peer`.
+                (!renewed
+                    && self
+                        .reservations
+                        .get(&event_source)
+                        .map(|cs| cs.len())
+                        .unwrap_or(0)
+                        > self.config.max_reservations_per_peer)
+                    // Deny if it exceeds `max_reservations`.
+                    || self
+                        .reservations
+                        .values()
+                        .map(|cs| cs.len())
+                        .sum::<usize>()
+                        >= self.config.max_reservations
+                    // Deny if it exceeds the allowed rate of reservations.
+                    || !self
+                        .config
+                        .reservation_rate_limiters
+                        .iter_mut()
+                        .all(|limiter| {
+                            limiter.try_next(event_source, endpoint.get_remote_address(), now)
+                        }) {
+                    NetworkBehaviourAction::NotifyHandler {
+                        handler: NotifyHandler::One(connection),
+                        peer_id: event_source,
+                        event: Either::Left(handler::In::DenyReservationReq {
+                            inbound_reservation_req,
+                            status: message_proto::Status::ResourceLimitExceeded,
+                        }),
+                    }
+                    .into()
                 } else {
-                    RelayHandlerIn::DenyDstReq(request)
+                    // Accept reservation.
+                    self.reservations
+                        .entry(event_source)
+                        .or_default()
+                        .insert(connection);
+
+                    Action::AcceptReservationPrototype {
+                        handler: NotifyHandler::One(connection),
+                        peer_id: event_source,
+                        inbound_reservation_req,
+                    }
                 };
 
-                self.outbox_to_swarm
-                    .push_back(NetworkBehaviourAction::NotifyHandler {
-                        peer_id: event_source,
-                        handler: NotifyHandler::One(connection),
-                        event: send_back,
-                    });
+                self.queued_actions.push_back(action);
             }
-            RelayHandlerEvent::OutgoingRelayReqError(_dst_peer_id, request_id) => {
-                self.outgoing_relay_reqs
-                    .upgrading
-                    .remove(&request_id)
-                    .expect("Outgoing relay request error for unknown request.");
+            handler::Event::ReservationReqAccepted { renewed } => {
+                // Ensure local eventual consistent reservation state matches handler (source of
+                // truth).
+                self.reservations
+                    .entry(event_source)
+                    .or_default()
+                    .insert(connection);
+
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::ReservationReqAccepted {
+                        src_peer_id: event_source,
+                        renewed,
+                    })
+                    .into(),
+                );
             }
-            RelayHandlerEvent::OutgoingRelayReqSuccess(_dst, request_id, stream) => {
-                let send_back = self
-                    .outgoing_relay_reqs
-                    .upgrading
-                    .remove(&request_id)
-                    .map(|OutgoingUpgradingRelayReq { send_back, .. }| send_back)
-                    .expect("Outgoing relay request success for unknown request.");
-                let _ = send_back.send(Ok(stream));
+            handler::Event::ReservationReqAcceptFailed { error } => {
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::ReservationReqAcceptFailed {
+                        src_peer_id: event_source,
+                        error,
+                    })
+                    .into(),
+                );
             }
-            RelayHandlerEvent::IncomingDstReqSuccess {
-                stream,
-                src_peer_id,
-                relay_peer_id,
-                relay_addr,
-            } => self.outbox_to_listeners.push_back((
-                relay_peer_id,
-                BehaviourToListenerMsg::IncomingRelayedConnection {
-                    stream,
-                    src_peer_id,
-                    relay_peer_id,
-                    relay_addr,
-                },
-            )),
-            RelayHandlerEvent::OutgoingDstReqError {
-                src_connection_id,
-                incoming_relay_req_deny_fut,
+            handler::Event::ReservationReqDenied {} => {
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::ReservationReqDenied {
+                        src_peer_id: event_source,
+                    })
+                    .into(),
+                );
+            }
+            handler::Event::ReservationReqDenyFailed { error } => {
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::ReservationReqDenyFailed {
+                        src_peer_id: event_source,
+                        error,
+                    })
+                    .into(),
+                );
+            }
+            handler::Event::ReservationTimedOut {} => {
+                match self.reservations.entry(event_source) {
+                    hash_map::Entry::Occupied(mut peer) => {
+                        peer.get_mut().remove(&connection);
+                        if peer.get().is_empty() {
+                            peer.remove();
+                        }
+                    }
+                    hash_map::Entry::Vacant(_) => {
+                        unreachable!(
+                            "Expect to track timed out reservation with peer {:?} on connection {:?}",
+                            event_source,
+                            connection,
+                        );
+                    }
+                }
+
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::ReservationTimedOut {
+                        src_peer_id: event_source,
+                    })
+                    .into(),
+                );
+            }
+            handler::Event::CircuitReqReceived {
+                inbound_circuit_req,
+                endpoint,
             } => {
-                self.outbox_to_swarm
-                    .push_back(NetworkBehaviourAction::NotifyHandler {
+                let now = Instant::now();
+
+                assert!(
+                    !endpoint.is_relayed(),
+                    "`dummy::ConnectionHandler` handles relayed connections. It \
+                     denies all inbound substreams."
+                );
+
+                let action = if self.circuits.num_circuits_of_peer(event_source)
+                    > self.config.max_circuits_per_peer
+                    || self.circuits.len() >= self.config.max_circuits
+                    || !self
+                        .config
+                        .circuit_src_rate_limiters
+                        .iter_mut()
+                        .all(|limiter| {
+                            limiter.try_next(event_source, endpoint.get_remote_address(), now)
+                        }) {
+                    // Deny circuit exceeding limits.
+                    NetworkBehaviourAction::NotifyHandler {
+                        handler: NotifyHandler::One(connection),
                         peer_id: event_source,
-                        handler: NotifyHandler::One(src_connection_id),
-                        event: RelayHandlerIn::DenyIncomingRelayReq(incoming_relay_req_deny_fut),
+                        event: Either::Left(handler::In::DenyCircuitReq {
+                            circuit_id: None,
+                            inbound_circuit_req,
+                            status: message_proto::Status::ResourceLimitExceeded,
+                        }),
+                    }
+                } else if let Some(dst_conn) = self
+                    .reservations
+                    .get(&inbound_circuit_req.dst())
+                    .and_then(|cs| cs.iter().next())
+                {
+                    // Accept circuit request if reservation present.
+                    let circuit_id = self.circuits.insert(Circuit {
+                        status: CircuitStatus::Accepting,
+                        src_peer_id: event_source,
+                        src_connection_id: connection,
+                        dst_peer_id: inbound_circuit_req.dst(),
+                        dst_connection_id: *dst_conn,
                     });
+
+                    NetworkBehaviourAction::NotifyHandler {
+                        handler: NotifyHandler::One(*dst_conn),
+                        peer_id: event_source,
+                        event: Either::Left(handler::In::NegotiateOutboundConnect {
+                            circuit_id,
+                            inbound_circuit_req,
+                            relay_peer_id: self.local_peer_id,
+                            src_peer_id: event_source,
+                            src_connection_id: connection,
+                        }),
+                    }
+                } else {
+                    // Deny circuit request if no reservation present.
+                    NetworkBehaviourAction::NotifyHandler {
+                        handler: NotifyHandler::One(connection),
+                        peer_id: event_source,
+                        event: Either::Left(handler::In::DenyCircuitReq {
+                            circuit_id: None,
+                            inbound_circuit_req,
+                            status: message_proto::Status::NoReservation,
+                        }),
+                    }
+                };
+                self.queued_actions.push_back(action.into());
+            }
+            handler::Event::CircuitReqReceiveFailed { error } => {
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqReceiveFailed {
+                        src_peer_id: event_source,
+                        error,
+                    })
+                    .into(),
+                );
+            }
+            handler::Event::CircuitReqDenied {
+                circuit_id,
+                dst_peer_id,
+            } => {
+                if let Some(circuit_id) = circuit_id {
+                    self.circuits.remove(circuit_id);
+                }
+
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqDenied {
+                        src_peer_id: event_source,
+                        dst_peer_id,
+                    })
+                    .into(),
+                );
+            }
+            handler::Event::CircuitReqDenyFailed {
+                circuit_id,
+                dst_peer_id,
+                error,
+            } => {
+                if let Some(circuit_id) = circuit_id {
+                    self.circuits.remove(circuit_id);
+                }
+
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqDenyFailed {
+                        src_peer_id: event_source,
+                        dst_peer_id,
+                        error,
+                    })
+                    .into(),
+                );
+            }
+            handler::Event::OutboundConnectNegotiated {
+                circuit_id,
+                src_peer_id,
+                src_connection_id,
+                inbound_circuit_req,
+                dst_handler_notifier,
+                dst_stream,
+                dst_pending_data,
+            } => {
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::NotifyHandler {
+                        handler: NotifyHandler::One(src_connection_id),
+                        peer_id: src_peer_id,
+                        event: Either::Left(handler::In::AcceptAndDriveCircuit {
+                            circuit_id,
+                            dst_peer_id: event_source,
+                            inbound_circuit_req,
+                            dst_handler_notifier,
+                            dst_stream,
+                            dst_pending_data,
+                        }),
+                    }
+                    .into(),
+                );
+            }
+            handler::Event::OutboundConnectNegotiationFailed {
+                circuit_id,
+                src_peer_id,
+                src_connection_id,
+                inbound_circuit_req,
+                status,
+                error,
+            } => {
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::NotifyHandler {
+                        handler: NotifyHandler::One(src_connection_id),
+                        peer_id: src_peer_id,
+                        event: Either::Left(handler::In::DenyCircuitReq {
+                            circuit_id: Some(circuit_id),
+                            inbound_circuit_req,
+                            status,
+                        }),
+                    }
+                    .into(),
+                );
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqOutboundConnectFailed {
+                        src_peer_id,
+                        dst_peer_id: event_source,
+                        error,
+                    })
+                    .into(),
+                );
+            }
+            handler::Event::CircuitReqAccepted {
+                dst_peer_id,
+                circuit_id,
+            } => {
+                self.circuits.accepted(circuit_id);
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqAccepted {
+                        src_peer_id: event_source,
+                        dst_peer_id,
+                    })
+                    .into(),
+                );
+            }
+            handler::Event::CircuitReqAcceptFailed {
+                dst_peer_id,
+                circuit_id,
+                error,
+            } => {
+                self.circuits.remove(circuit_id);
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqAcceptFailed {
+                        src_peer_id: event_source,
+                        dst_peer_id,
+                        error,
+                    })
+                    .into(),
+                );
+            }
+            handler::Event::CircuitClosed {
+                dst_peer_id,
+                circuit_id,
+                error,
+            } => {
+                self.circuits.remove(circuit_id);
+
+                self.queued_actions.push_back(
+                    NetworkBehaviourAction::GenerateEvent(Event::CircuitClosed {
+                        src_peer_id: event_source,
+                        dst_peer_id,
+                        error,
+                    })
+                    .into(),
+                );
             }
         }
     }
 
     fn poll(
         &mut self,
-        cx: &mut Context<'_>,
-        poll_parameters: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
-        if !self.outbox_to_listeners.is_empty() {
-            let relay_peer_id = self.outbox_to_listeners[0].0;
-
-            let listeners = &mut self.listeners;
-            let listener_any_relay = self.listener_any_relay.as_mut();
-
-            // Get channel sender to the listener that is explicitly listening
-            // via this relay node, or, if registered, channel sender to
-            // listener listening via any relay.
-            let to_listener = listeners
-                .get_mut(&relay_peer_id)
-                .filter(|l| !l.is_closed())
-                .and_then(|l| match l {
-                    RelayListener::Connected { to_listener, .. } => Some(to_listener),
-                    // State mismatch. Got relayed connection via relay, but
-                    // local node is not connected to relay.
-                    RelayListener::Connecting { .. } => None,
-                })
-                .or_else(|| listener_any_relay)
-                .filter(|l| !l.is_closed());
-
-            match to_listener {
-                Some(to_listener) => match to_listener.poll_ready(cx) {
-                    Poll::Ready(Ok(())) => {
-                        if let Err(mpsc::SendError { .. }) = to_listener.start_send(
-                            self.outbox_to_listeners
-                                .pop_front()
-                                .expect("Outbox is empty despite !is_empty().")
-                                .1,
-                        ) {
-                            self.listeners.remove(&relay_peer_id);
-                        }
-                    }
-                    Poll::Ready(Err(mpsc::SendError { .. })) => {
-                        self.outbox_to_listeners.pop_front();
-                        self.listeners.remove(&relay_peer_id);
-                    }
-                    Poll::Pending => {}
-                },
-                None => {
-                    // No listener to send request to, thus dropping it. This
-                    // case should be rare, as we check whether we have a
-                    // listener before accepting an incoming destination
-                    // request.
-                    let event = self.outbox_to_listeners.pop_front();
-                    log::trace!("Dropping event for unknown listener: {:?}", event);
-                }
-            }
-        }
-
-        loop {
-            match self.from_transport.poll_next_unpin(cx) {
-                Poll::Ready(Some(TransportToBehaviourMsg::DialReq {
-                    request_id,
-                    relay_addr,
-                    relay_peer_id,
-                    dst_addr,
-                    dst_peer_id,
-                    send_back,
-                })) => {
-                    if self.connected_peers.get(&relay_peer_id).is_some() {
-                        // In case we are already listening via the relay,
-                        // prefer the primary connection.
-                        let handler = self
-                            .listeners
-                            .get(&relay_peer_id)
-                            .and_then(|s| {
-                                if let RelayListener::Connected { connection_id, .. } = s {
-                                    Some(NotifyHandler::One(*connection_id))
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(NotifyHandler::Any);
-                        self.outbox_to_swarm
-                            .push_back(NetworkBehaviourAction::NotifyHandler {
-                                peer_id: relay_peer_id,
-                                handler,
-                                event: RelayHandlerIn::OutgoingRelayReq {
-                                    request_id,
-                                    src_peer_id: *poll_parameters.local_peer_id(),
-                                    dst_peer_id,
-                                    dst_addr: dst_addr.clone(),
-                                },
-                            });
-
-                        self.outgoing_relay_reqs
-                            .upgrading
-                            .insert(request_id, OutgoingUpgradingRelayReq { send_back });
-                    } else {
-                        self.outgoing_relay_reqs
-                            .dialing
-                            .entry(relay_peer_id)
-                            .or_default()
-                            .push(OutgoingDialingRelayReq {
-                                src_peer_id: *poll_parameters.local_peer_id(),
-                                request_id,
-                                relay_addr,
-                                dst_addr,
-                                dst_peer_id,
-                                send_back,
-                            });
-                        return Poll::Ready(NetworkBehaviourAction::DialPeer {
-                            peer_id: relay_peer_id,
-                            condition: DialPeerCondition::Disconnected,
-                            handler: self.new_handler(),
-                        });
-                    }
-                }
-                Poll::Ready(Some(TransportToBehaviourMsg::ListenReq {
-                    relay_peer_id_and_addr,
-                    mut to_listener,
-                })) => {
-                    match relay_peer_id_and_addr {
-                        // Listener is listening for all incoming relayed
-                        // connections from any relay
-                        // node.
-                        None => {
-                            match self.listener_any_relay.as_mut() {
-                                Some(sender) if !sender.is_closed() => {
-                                    // Already got listener listening for all
-                                    // incoming relayed connections. Signal to
-                                    // listener by dropping the channel sender
-                                    // to the listener.
-                                }
-                                _ => {
-                                    to_listener
-                                        .start_send(
-                                            BehaviourToListenerMsg::ConnectionToRelayEstablished,
-                                        )
-                                        .expect("Channel to have at least capacity of 1.");
-                                    self.listener_any_relay = Some(to_listener);
-                                }
-                            }
-                        }
-                        // Listener is listening for incoming relayed
-                        // connections from this relay only.
-                        Some((relay_peer_id, relay_addr)) => {
-                            if let Some(connections) = self.connected_peers.get(&relay_peer_id) {
-                                to_listener
-                                    .start_send(
-                                        BehaviourToListenerMsg::ConnectionToRelayEstablished,
-                                    )
-                                    .expect("Channel to have at least capacity of 1.");
-                                let primary_connection =
-                                    connections.iter().next().expect("At least one connection.");
-                                self.listeners.insert(
-                                    relay_peer_id,
-                                    RelayListener::Connected {
-                                        connection_id: *primary_connection,
-                                        to_listener,
-                                    },
-                                );
-
-                                self.outbox_to_swarm.push_back(
-                                    NetworkBehaviourAction::NotifyHandler {
-                                        peer_id: relay_peer_id,
-                                        handler: NotifyHandler::One(*primary_connection),
-                                        event: RelayHandlerIn::UsedForListening(true),
-                                    },
-                                );
-                            } else {
-                                self.listeners.insert(
-                                    relay_peer_id,
-                                    RelayListener::Connecting {
-                                        relay_addr,
-                                        to_listener,
-                                    },
-                                );
-                                return Poll::Ready(NetworkBehaviourAction::DialPeer {
-                                    peer_id: relay_peer_id,
-                                    condition: DialPeerCondition::Disconnected,
-                                    handler: self.new_handler(),
-                                });
-                            }
-                        }
-                    }
-                }
-                Poll::Ready(None) => unreachable!(
-                    "`Relay` `NetworkBehaviour` polled after channel from \
-                     `RelayTransport` has been closed.",
-                ),
-                Poll::Pending => break,
-            }
-        }
-
-        if let Some(event) = self.outbox_to_swarm.pop_front() {
-            return Poll::Ready(event);
+        _cx: &mut Context<'_>,
+        _: &mut impl PollParameters,
+    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>> {
+        if let Some(action) = self.queued_actions.pop_front() {
+            return Poll::Ready(action.build(self.local_peer_id, &self.external_addresses));
         }
 
         Poll::Pending
     }
 }
 
-#[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
-pub enum BehaviourToListenerMsg {
-    ConnectionToRelayEstablished,
-    IncomingRelayedConnection {
-        stream: protocol::Connection,
-        src_peer_id: PeerId,
-        relay_peer_id: PeerId,
-        relay_addr: Multiaddr,
-    },
+#[derive(Default)]
+struct CircuitsTracker {
+    next_id: CircuitId,
+    circuits: HashMap<CircuitId, Circuit>,
 }
 
-enum RelayListener {
-    Connecting {
-        relay_addr: Multiaddr,
-        to_listener: mpsc::Sender<BehaviourToListenerMsg>,
-    },
-    Connected {
+impl CircuitsTracker {
+    fn len(&self) -> usize {
+        self.circuits.len()
+    }
+
+    fn insert(&mut self, circuit: Circuit) -> CircuitId {
+        let id = self.next_id;
+        self.next_id = self.next_id + 1;
+
+        self.circuits.insert(id, circuit);
+
+        id
+    }
+
+    fn accepted(&mut self, circuit_id: CircuitId) {
+        if let Some(c) = self.circuits.get_mut(&circuit_id) {
+            c.status = CircuitStatus::Accepted;
+        };
+    }
+
+    fn remove(&mut self, circuit_id: CircuitId) -> Option<Circuit> {
+        self.circuits.remove(&circuit_id)
+    }
+
+    fn remove_by_connection(
+        &mut self,
+        peer_id: PeerId,
         connection_id: ConnectionId,
-        to_listener: mpsc::Sender<BehaviourToListenerMsg>,
-    },
-}
+    ) -> Vec<Circuit> {
+        let mut removed = vec![];
 
-impl RelayListener {
-    /// Returns whether the channel to the
-    /// [`RelayListener`](crate::transport::RelayListener) is closed.
-    fn is_closed(&self) -> bool {
-        match self {
-            RelayListener::Connecting { to_listener, .. }
-            | RelayListener::Connected { to_listener, .. } => to_listener.is_closed(),
-        }
+        self.circuits.retain(|_circuit_id, circuit| {
+            let is_src =
+                circuit.src_peer_id == peer_id && circuit.src_connection_id == connection_id;
+            let is_dst =
+                circuit.dst_peer_id == peer_id && circuit.dst_connection_id == connection_id;
+
+            if is_src || is_dst {
+                removed.push(circuit.clone());
+                // Remove circuit from HashMap.
+                false
+            } else {
+                // Retain circuit in HashMap.
+                true
+            }
+        });
+
+        removed
+    }
+
+    fn num_circuits_of_peer(&self, peer: PeerId) -> usize {
+        self.circuits
+            .iter()
+            .filter(|(_, c)| c.src_peer_id == peer || c.dst_peer_id == peer)
+            .count()
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum OutgoingRelayReqError {
-    DialingRelay,
+#[derive(Clone)]
+struct Circuit {
+    src_peer_id: PeerId,
+    src_connection_id: ConnectionId,
+    dst_peer_id: PeerId,
+    dst_connection_id: ConnectionId,
+    status: CircuitStatus,
+}
+
+#[derive(Clone)]
+enum CircuitStatus {
+    Accepting,
+    Accepted,
+}
+
+#[derive(Default, Clone, Copy, Debug, Hash, Eq, PartialEq)]
+pub struct CircuitId(u64);
+
+impl Add<u64> for CircuitId {
+    type Output = CircuitId;
+
+    fn add(self, rhs: u64) -> Self {
+        CircuitId(self.0 + rhs)
+    }
+}
+
+/// A [`NetworkBehaviourAction`], either complete, or still requiring data from [`PollParameters`]
+/// before being returned in [`Behaviour::poll`].
+#[allow(clippy::large_enum_variant)]
+enum Action {
+    Done(NetworkBehaviourAction<Event, handler::Prototype>),
+    AcceptReservationPrototype {
+        inbound_reservation_req: inbound_hop::ReservationReq,
+        handler: NotifyHandler,
+        peer_id: PeerId,
+    },
+}
+
+impl From<NetworkBehaviourAction<Event, handler::Prototype>> for Action {
+    fn from(action: NetworkBehaviourAction<Event, handler::Prototype>) -> Self {
+        Self::Done(action)
+    }
+}
+
+impl Action {
+    fn build(
+        self,
+        local_peer_id: PeerId,
+        external_addresses: &ExternalAddresses,
+    ) -> NetworkBehaviourAction<Event, handler::Prototype> {
+        match self {
+            Action::Done(action) => action,
+            Action::AcceptReservationPrototype {
+                inbound_reservation_req,
+                handler,
+                peer_id,
+            } => NetworkBehaviourAction::NotifyHandler {
+                handler,
+                peer_id,
+                event: Either::Left(handler::In::AcceptReservationReq {
+                    inbound_reservation_req,
+                    addrs: external_addresses
+                        .iter()
+                        .cloned()
+                        // Add local peer ID in case it isn't present yet.
+                        .filter_map(|a| match a.iter().last()? {
+                            Protocol::P2p(_) => Some(a),
+                            _ => Some(a.with(Protocol::P2p(local_peer_id.into()))),
+                        })
+                        .collect(),
+                }),
+            },
+        }
+    }
 }

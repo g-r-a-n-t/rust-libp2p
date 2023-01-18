@@ -94,7 +94,7 @@ impl SubstreamHandler for Stream {
         }))
     }
 
-    fn inject_event(self, event: Self::InEvent) -> Self {
+    fn on_event(self, event: Self::InEvent) -> Self {
         void::unreachable(event)
     }
 
@@ -120,6 +120,8 @@ pub enum OutEvent {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 pub enum OpenInfo {
     RegisterRequest(NewRegistration),

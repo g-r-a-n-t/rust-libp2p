@@ -21,6 +21,7 @@
 mod memory;
 
 pub use memory::{MemoryStore, MemoryStoreConfig};
+use thiserror::Error;
 
 use super::*;
 use crate::K_VALUE;
@@ -30,14 +31,18 @@ use std::borrow::Cow;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// The possible errors of a `RecordStore` operation.
-#[derive(Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum Error {
     /// The store is at capacity w.r.t. the total number of stored records.
+    #[error("the store cannot contain any more records")]
     MaxRecords,
-    /// The store is at capacity w.r.t. the total number of stored keys for
-    /// provider records.
+
+    /// The store is at capacity w.r.t. the total number of stored provider records.
+    #[error("the store cannot contain any more provider records")]
     MaxProvidedKeys,
-    /// The value of a record to be stored is too large.
+
+    /// The store cannot store this value because it is too large.
+    #[error("the value is too large to be stored")]
     ValueTooLarge,
 }
 
@@ -59,36 +64,40 @@ pub enum Error {
 ///      content. Just like a regular record, a provider record is distributed
 ///      to the closest nodes to the key.
 ///
-pub trait RecordStore<'a> {
-    type RecordsIter: Iterator<Item = Cow<'a, Record>>;
-    type ProvidedIter: Iterator<Item = Cow<'a, ProviderRecord>>;
+pub trait RecordStore {
+    type RecordsIter<'a>: Iterator<Item = Cow<'a, Record>>
+    where
+        Self: 'a;
+    type ProvidedIter<'a>: Iterator<Item = Cow<'a, ProviderRecord>>
+    where
+        Self: 'a;
 
     /// Gets a record from the store, given its key.
-    fn get(&'a self, k: &Key) -> Option<Cow<'_, Record>>;
+    fn get(&self, k: &Key) -> Option<Cow<'_, Record>>;
 
     /// Puts a record into the store.
-    fn put(&'a mut self, r: Record) -> Result<()>;
+    fn put(&mut self, r: Record) -> Result<()>;
 
     /// Removes the record with the given key from the store.
-    fn remove(&'a mut self, k: &Key);
+    fn remove(&mut self, k: &Key);
 
     /// Gets an iterator over all (value-) records currently stored.
-    fn records(&'a self) -> Self::RecordsIter;
+    fn records(&self) -> Self::RecordsIter<'_>;
 
     /// Adds a provider record to the store.
     ///
     /// A record store only needs to store a number of provider records
     /// for a key corresponding to the replication factor and should
     /// store those records whose providers are closest to the key.
-    fn add_provider(&'a mut self, record: ProviderRecord) -> Result<()>;
+    fn add_provider(&mut self, record: ProviderRecord) -> Result<()>;
 
     /// Gets a copy of the stored provider records for the given key.
-    fn providers(&'a self, key: &Key) -> Vec<ProviderRecord>;
+    fn providers(&self, key: &Key) -> Vec<ProviderRecord>;
 
     /// Gets an iterator over all stored provider records for which the
     /// node owning the store is itself the provider.
-    fn provided(&'a self) -> Self::ProvidedIter;
+    fn provided(&self) -> Self::ProvidedIter<'_>;
 
     /// Removes a provider record from the store.
-    fn remove_provider(&'a mut self, k: &Key, p: &PeerId);
+    fn remove_provider(&mut self, k: &Key, p: &PeerId);
 }

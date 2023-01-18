@@ -1,6 +1,6 @@
 use crate::identity::error::SigningError;
 use crate::identity::Keypair;
-use crate::{identity, PublicKey};
+use crate::{identity, DecodeError, PublicKey};
 use std::convert::TryInto;
 use std::fmt;
 use unsigned_varint::encode::usize_buffer;
@@ -8,7 +8,7 @@ use unsigned_varint::encode::usize_buffer;
 /// A signed envelope contains an arbitrary byte string payload, a signature of the payload, and the public key that can be used to verify the signature.
 ///
 /// For more details see libp2p RFC0002: <https://github.com/libp2p/specs/blob/master/RFC/0002-signed-envelopes.md>
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedEnvelope {
     key: PublicKey,
     payload_type: Vec<u8>,
@@ -19,7 +19,7 @@ pub struct SignedEnvelope {
 impl SignedEnvelope {
     /// Constructs a new [`SignedEnvelope`].
     pub fn new(
-        key: Keypair,
+        key: &Keypair,
         domain_separation: String,
         payload_type: Vec<u8>,
         payload: Vec<u8>,
@@ -44,15 +44,19 @@ impl SignedEnvelope {
         self.key.verify(&buffer, &self.signature)
     }
 
-    /// Extract the payload of this [`SignedEnvelope`].
+    /// Extract the payload and signing key of this [`SignedEnvelope`].
     ///
     /// You must provide the correct domain-separation string and expected payload type in order to get the payload.
     /// This guards against accidental mis-use of the payload where the signature was created for a different purpose or payload type.
-    pub fn payload(
+    ///
+    /// It is the caller's responsibility to check that the signing key is what
+    /// is expected. For example, checking that the signing key is from a
+    /// certain peer.
+    pub fn payload_and_signing_key(
         &self,
         domain_separation: String,
         expected_payload_type: &[u8],
-    ) -> Result<&[u8], ReadPayloadError> {
+    ) -> Result<(&[u8], &PublicKey), ReadPayloadError> {
         if self.payload_type != expected_payload_type {
             return Err(ReadPayloadError::UnexpectedPayloadType {
                 expected: expected_payload_type.to_vec(),
@@ -64,7 +68,7 @@ impl SignedEnvelope {
             return Err(ReadPayloadError::InvalidSignature);
         }
 
-        Ok(&self.payload)
+        Ok((&self.payload, &self.key))
     }
 
     /// Encode this [`SignedEnvelope`] using the protobuf encoding specified in the RFC.
@@ -90,7 +94,7 @@ impl SignedEnvelope {
     pub fn from_protobuf_encoding(bytes: &[u8]) -> Result<Self, DecodingError> {
         use prost::Message;
 
-        let envelope = crate::envelope_proto::Envelope::decode(bytes)?;
+        let envelope = crate::envelope_proto::Envelope::decode(bytes).map_err(DecodeError)?;
 
         Ok(Self {
             key: envelope
@@ -136,46 +140,17 @@ fn signature_payload(domain_separation: String, payload_type: &[u8], payload: &[
 }
 
 /// Errors that occur whilst decoding a [`SignedEnvelope`] from its byte representation.
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum DecodingError {
     /// Decoding the provided bytes as a signed envelope failed.
-    InvalidEnvelope(prost::DecodeError),
+    #[error("Failed to decode envelope")]
+    InvalidEnvelope(#[from] DecodeError),
     /// The public key in the envelope could not be converted to our internal public key type.
-    InvalidPublicKey(identity::error::DecodingError),
+    #[error("Failed to convert public key")]
+    InvalidPublicKey(#[from] identity::error::DecodingError),
     /// The public key in the envelope could not be converted to our internal public key type.
+    #[error("Public key is missing from protobuf struct")]
     MissingPublicKey,
-}
-
-impl From<prost::DecodeError> for DecodingError {
-    fn from(e: prost::DecodeError) -> Self {
-        Self::InvalidEnvelope(e)
-    }
-}
-
-impl From<identity::error::DecodingError> for DecodingError {
-    fn from(e: identity::error::DecodingError) -> Self {
-        Self::InvalidPublicKey(e)
-    }
-}
-
-impl fmt::Display for DecodingError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidEnvelope(_) => write!(f, "Failed to decode envelope"),
-            Self::InvalidPublicKey(_) => write!(f, "Failed to convert public key"),
-            Self::MissingPublicKey => write!(f, "Public key is missing from protobuf struct"),
-        }
-    }
-}
-
-impl std::error::Error for DecodingError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::InvalidEnvelope(inner) => Some(inner),
-            Self::InvalidPublicKey(inner) => Some(inner),
-            Self::MissingPublicKey => None,
-        }
-    }
 }
 
 /// Errors that occur whilst extracting the payload of a [`SignedEnvelope`].
@@ -193,11 +168,38 @@ impl fmt::Display for ReadPayloadError {
             Self::InvalidSignature => write!(f, "Invalid signature"),
             Self::UnexpectedPayloadType { expected, got } => write!(
                 f,
-                "Unexpected payload type, expected {:?} but got {:?}",
-                expected, got
+                "Unexpected payload type, expected {expected:?} but got {got:?}"
             ),
         }
     }
 }
 
 impl std::error::Error for ReadPayloadError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    pub fn test_roundtrip() {
+        let kp = Keypair::generate_ed25519();
+        let payload = "some payload".as_bytes();
+        let domain_separation = "domain separation".to_string();
+        let payload_type: Vec<u8> = "payload type".into();
+
+        let env = SignedEnvelope::new(
+            &kp,
+            domain_separation.clone(),
+            payload_type.clone(),
+            payload.into(),
+        )
+        .expect("Failed to create envelope");
+
+        let (actual_payload, signing_key) = env
+            .payload_and_signing_key(domain_separation, &payload_type)
+            .expect("Failed to extract payload and public key");
+
+        assert_eq!(actual_payload, payload);
+        assert_eq!(signing_key, &kp.public());
+    }
+}

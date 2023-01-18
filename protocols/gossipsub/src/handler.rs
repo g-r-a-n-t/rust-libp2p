@@ -18,16 +18,18 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::config::ValidationMode;
 use crate::error::{GossipsubHandlerError, ValidationError};
 use crate::protocol::{GossipsubCodec, ProtocolConfig};
 use crate::types::{GossipsubRpc, PeerKind, RawGossipsubMessage};
 use asynchronous_codec::Framed;
 use futures::prelude::*;
 use futures::StreamExt;
-use libp2p_core::upgrade::{InboundUpgrade, NegotiationError, OutboundUpgrade, UpgradeError};
-use libp2p_swarm::protocols_handler::{
-    KeepAlive, ProtocolsHandler, ProtocolsHandlerEvent, ProtocolsHandlerUpgrErr, SubstreamProtocol,
+use instant::Instant;
+use libp2p_core::upgrade::{NegotiationError, UpgradeError};
+use libp2p_swarm::handler::{
+    ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr,
+    DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound, KeepAlive,
+    SubstreamProtocol,
 };
 use libp2p_swarm::NegotiatedSubstream;
 use log::{error, trace, warn};
@@ -39,7 +41,6 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use wasm_timer::Instant;
 
 /// The initial time (in seconds) we set the keep alive for protocol negotiations to occur.
 const INITIAL_KEEP_ALIVE: u64 = 30;
@@ -63,7 +64,7 @@ pub enum HandlerEvent {
 }
 
 /// A message sent from the behaviour to the handler.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum GossipsubHandlerIn {
     /// A gossipsub message to send.
     Message(crate::rpc_proto::Rpc),
@@ -123,7 +124,7 @@ pub struct GossipsubHandler {
     idle_timeout: Duration,
 
     /// Collection of errors from attempting an upgrade.
-    upgrade_errors: VecDeque<ProtocolsHandlerUpgrErr<GossipsubHandlerError>>,
+    upgrade_errors: VecDeque<ConnectionHandlerUpgrErr<GossipsubHandlerError>>,
 
     /// Flag determining whether to maintain the connection to the peer.
     keep_alive: KeepAlive,
@@ -162,23 +163,9 @@ enum OutboundSubstreamState {
 
 impl GossipsubHandler {
     /// Builds a new [`GossipsubHandler`].
-    pub fn new(
-        protocol_id_prefix: std::borrow::Cow<'static, str>,
-        max_transmit_size: usize,
-        validation_mode: ValidationMode,
-        idle_timeout: Duration,
-        support_floodsub: bool,
-    ) -> Self {
+    pub fn new(protocol_config: ProtocolConfig, idle_timeout: Duration) -> Self {
         GossipsubHandler {
-            listen_protocol: SubstreamProtocol::new(
-                ProtocolConfig::new(
-                    protocol_id_prefix,
-                    max_transmit_size,
-                    validation_mode,
-                    support_floodsub,
-                ),
-                (),
-            ),
+            listen_protocol: SubstreamProtocol::new(protocol_config, ()),
             inbound_substream: None,
             outbound_substream: None,
             outbound_substream_establishing: false,
@@ -194,26 +181,16 @@ impl GossipsubHandler {
             in_mesh: false,
         }
     }
-}
 
-impl ProtocolsHandler for GossipsubHandler {
-    type InEvent = GossipsubHandlerIn;
-    type OutEvent = HandlerEvent;
-    type Error = GossipsubHandlerError;
-    type InboundOpenInfo = ();
-    type InboundProtocol = ProtocolConfig;
-    type OutboundOpenInfo = crate::rpc_proto::Rpc;
-    type OutboundProtocol = ProtocolConfig;
-
-    fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
-        self.listen_protocol.clone()
-    }
-
-    fn inject_fully_negotiated_inbound(
+    fn on_fully_negotiated_inbound(
         &mut self,
-        (substream, peer_kind): <Self::InboundProtocol as InboundUpgrade<NegotiatedSubstream>>::Output,
-        _info: Self::InboundOpenInfo,
+        FullyNegotiatedInbound { protocol, .. }: FullyNegotiatedInbound<
+            <Self as ConnectionHandler>::InboundProtocol,
+            <Self as ConnectionHandler>::InboundOpenInfo,
+        >,
     ) {
+        let (substream, peer_kind) = protocol;
+
         // If the peer doesn't support the protocol, reject all substreams
         if self.protocol_unsupported {
             return;
@@ -231,11 +208,18 @@ impl ProtocolsHandler for GossipsubHandler {
         self.inbound_substream = Some(InboundSubstreamState::WaitingInput(substream));
     }
 
-    fn inject_fully_negotiated_outbound(
+    fn on_fully_negotiated_outbound(
         &mut self,
-        (substream, peer_kind): <Self::OutboundProtocol as OutboundUpgrade<NegotiatedSubstream>>::Output,
-        message: Self::OutboundOpenInfo,
+        FullyNegotiatedOutbound {
+            protocol,
+            info: message,
+        }: FullyNegotiatedOutbound<
+            <Self as ConnectionHandler>::OutboundProtocol,
+            <Self as ConnectionHandler>::OutboundOpenInfo,
+        >,
     ) {
+        let (substream, peer_kind) = protocol;
+
         // If the peer doesn't support the protocol, reject all substreams
         if self.protocol_unsupported {
             return;
@@ -259,8 +243,22 @@ impl ProtocolsHandler for GossipsubHandler {
             self.outbound_substream = Some(OutboundSubstreamState::PendingSend(substream, message));
         }
     }
+}
 
-    fn inject_event(&mut self, message: GossipsubHandlerIn) {
+impl ConnectionHandler for GossipsubHandler {
+    type InEvent = GossipsubHandlerIn;
+    type OutEvent = HandlerEvent;
+    type Error = GossipsubHandlerError;
+    type InboundOpenInfo = ();
+    type InboundProtocol = ProtocolConfig;
+    type OutboundOpenInfo = crate::rpc_proto::Rpc;
+    type OutboundProtocol = ProtocolConfig;
+
+    fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
+        self.listen_protocol.clone()
+    }
+
+    fn on_behaviour_event(&mut self, message: GossipsubHandlerIn) {
         if !self.protocol_unsupported {
             match message {
                 GossipsubHandlerIn::Message(m) => self.send_queue.push(m),
@@ -278,18 +276,6 @@ impl ProtocolsHandler for GossipsubHandler {
         }
     }
 
-    fn inject_dial_upgrade_error(
-        &mut self,
-        _: Self::OutboundOpenInfo,
-        e: ProtocolsHandlerUpgrErr<
-            <Self::OutboundProtocol as OutboundUpgrade<NegotiatedSubstream>>::Error,
-        >,
-    ) {
-        self.outbound_substream_establishing = false;
-        warn!("Dial upgrade error {:?}", e);
-        self.upgrade_errors.push_back(e);
-    }
-
     fn connection_keep_alive(&self) -> KeepAlive {
         self.keep_alive
     }
@@ -298,7 +284,7 @@ impl ProtocolsHandler for GossipsubHandler {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<
-        ProtocolsHandlerEvent<
+        ConnectionHandlerEvent<
             Self::OutboundProtocol,
             Self::OutboundOpenInfo,
             Self::OutEvent,
@@ -309,12 +295,12 @@ impl ProtocolsHandler for GossipsubHandler {
         if let Some(error) = self.upgrade_errors.pop_front() {
             let reported_error = match error {
                 // Timeout errors get mapped to NegotiationTimeout and we close the connection.
-                ProtocolsHandlerUpgrErr::Timeout | ProtocolsHandlerUpgrErr::Timer => {
+                ConnectionHandlerUpgrErr::Timeout | ConnectionHandlerUpgrErr::Timer => {
                     Some(GossipsubHandlerError::NegotiationTimeout)
                 }
                 // There was an error post negotiation, close the connection.
-                ProtocolsHandlerUpgrErr::Upgrade(UpgradeError::Apply(e)) => Some(e),
-                ProtocolsHandlerUpgrErr::Upgrade(UpgradeError::Select(negotiation_error)) => {
+                ConnectionHandlerUpgrErr::Upgrade(UpgradeError::Apply(e)) => Some(e),
+                ConnectionHandlerUpgrErr::Upgrade(UpgradeError::Select(negotiation_error)) => {
                     match negotiation_error {
                         NegotiationError::Failed => {
                             // The protocol is not supported
@@ -325,7 +311,7 @@ impl ProtocolsHandler for GossipsubHandler {
                                 self.inbound_substream = None;
                                 self.outbound_substream = None;
                                 self.keep_alive = KeepAlive::No;
-                                return Poll::Ready(ProtocolsHandlerEvent::Custom(
+                                return Poll::Ready(ConnectionHandlerEvent::Custom(
                                     HandlerEvent::PeerKind(PeerKind::NotSupported),
                                 ));
                             } else {
@@ -341,14 +327,14 @@ impl ProtocolsHandler for GossipsubHandler {
 
             // If there was a fatal error, close the connection.
             if let Some(error) = reported_error {
-                return Poll::Ready(ProtocolsHandlerEvent::Close(error));
+                return Poll::Ready(ConnectionHandlerEvent::Close(error));
             }
         }
 
         if !self.peer_kind_sent {
             if let Some(peer_kind) = self.peer_kind.as_ref() {
                 self.peer_kind_sent = true;
-                return Poll::Ready(ProtocolsHandlerEvent::Custom(HandlerEvent::PeerKind(
+                return Poll::Ready(ConnectionHandlerEvent::Custom(HandlerEvent::PeerKind(
                     peer_kind.clone(),
                 )));
             }
@@ -356,7 +342,7 @@ impl ProtocolsHandler for GossipsubHandler {
 
         if self.inbound_substreams_created > MAX_SUBSTREAM_CREATION {
             // Too many inbound substreams have been created, end the connection.
-            return Poll::Ready(ProtocolsHandlerEvent::Close(
+            return Poll::Ready(ConnectionHandlerEvent::Close(
                 GossipsubHandlerError::MaxInboundSubstreams,
             ));
         }
@@ -367,14 +353,14 @@ impl ProtocolsHandler for GossipsubHandler {
             && !self.outbound_substream_establishing
         {
             if self.outbound_substreams_created >= MAX_SUBSTREAM_CREATION {
-                return Poll::Ready(ProtocolsHandlerEvent::Close(
+                return Poll::Ready(ConnectionHandlerEvent::Close(
                     GossipsubHandlerError::MaxOutboundSubstreams,
                 ));
             }
             let message = self.send_queue.remove(0);
             self.send_queue.shrink_to_fit();
             self.outbound_substream_establishing = true;
-            return Poll::Ready(ProtocolsHandlerEvent::OutboundSubstreamRequest {
+            return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
                 protocol: self.listen_protocol.clone().map_info(|()| message),
             });
         }
@@ -394,7 +380,7 @@ impl ProtocolsHandler for GossipsubHandler {
                             }
                             self.inbound_substream =
                                 Some(InboundSubstreamState::WaitingInput(substream));
-                            return Poll::Ready(ProtocolsHandlerEvent::Custom(message));
+                            return Poll::Ready(ConnectionHandlerEvent::Custom(message));
                         }
                         Poll::Ready(Some(Err(error))) => {
                             match error {
@@ -492,13 +478,13 @@ impl ProtocolsHandler for GossipsubHandler {
                                 }
                                 Err(e) => {
                                     error!("Error sending message: {}", e);
-                                    return Poll::Ready(ProtocolsHandlerEvent::Close(e));
+                                    return Poll::Ready(ConnectionHandlerEvent::Close(e));
                                 }
                             }
                         }
                         Poll::Ready(Err(e)) => {
                             error!("Outbound substream error while sending output: {:?}", e);
-                            return Poll::Ready(ProtocolsHandlerEvent::Close(e));
+                            return Poll::Ready(ConnectionHandlerEvent::Close(e));
                         }
                         Poll::Pending => {
                             self.keep_alive = KeepAlive::Yes;
@@ -519,7 +505,9 @@ impl ProtocolsHandler for GossipsubHandler {
                             self.outbound_substream =
                                 Some(OutboundSubstreamState::WaitingOutput(substream))
                         }
-                        Poll::Ready(Err(e)) => return Poll::Ready(ProtocolsHandlerEvent::Close(e)),
+                        Poll::Ready(Err(e)) => {
+                            return Poll::Ready(ConnectionHandlerEvent::Close(e))
+                        }
                         Poll::Pending => {
                             self.keep_alive = KeepAlive::Yes;
                             self.outbound_substream =
@@ -540,7 +528,7 @@ impl ProtocolsHandler for GossipsubHandler {
                         }
                         Poll::Ready(Err(e)) => {
                             warn!("Outbound substream error while closing: {:?}", e);
-                            return Poll::Ready(ProtocolsHandlerEvent::Close(
+                            return Poll::Ready(ConnectionHandlerEvent::Close(
                                 io::Error::new(
                                     io::ErrorKind::BrokenPipe,
                                     "Failed to close outbound substream",
@@ -567,5 +555,30 @@ impl ProtocolsHandler for GossipsubHandler {
         }
 
         Poll::Pending
+    }
+
+    fn on_connection_event(
+        &mut self,
+        event: ConnectionEvent<
+            Self::InboundProtocol,
+            Self::OutboundProtocol,
+            Self::InboundOpenInfo,
+            Self::OutboundOpenInfo,
+        >,
+    ) {
+        match event {
+            ConnectionEvent::FullyNegotiatedInbound(fully_negotiated_inbound) => {
+                self.on_fully_negotiated_inbound(fully_negotiated_inbound)
+            }
+            ConnectionEvent::FullyNegotiatedOutbound(fully_negotiated_outbound) => {
+                self.on_fully_negotiated_outbound(fully_negotiated_outbound)
+            }
+            ConnectionEvent::DialUpgradeError(DialUpgradeError { error: e, .. }) => {
+                self.outbound_substream_establishing = false;
+                warn!("Dial upgrade error {:?}", e);
+                self.upgrade_errors.push_back(e);
+            }
+            ConnectionEvent::AddressChange(_) | ConnectionEvent::ListenUpgradeError(_) => {}
+        }
     }
 }

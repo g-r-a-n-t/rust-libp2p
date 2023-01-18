@@ -1,4 +1,62 @@
-# 0.30.0 [unreleased]
+# 0.39.0 [unreleased]
+
+- Update to `libp2p-core` `v0.39.0`.
+
+# 0.38.0
+
+- Update to `libp2p-core` `v0.38.0`.
+
+- Update `rust-version` to reflect the actual MSRV: 1.60.0. See [PR 3090].
+
+[PR 3090]: https://github.com/libp2p/rust-libp2p/pull/3090
+
+# 0.37.0
+
+- Remove default features. If you previously depended on `async-std` you need to enable this explicitly now. See [PR 2918].
+
+- Update to `libp2p-core` `v0.37.0`.
+
+[PR 2918]: https://github.com/libp2p/rust-libp2p/pull/2918
+
+# 0.36.0
+
+- Update to `libp2p-core` `v0.36.0`.
+
+# 0.35.0
+
+- Update to `libp2p-core` `v0.35.0`.
+
+# 0.34.0
+
+- Update to `libp2p-core` `v0.34.0`.
+
+# 0.33.0
+
+- Update to `libp2p-core` `v0.33.0`.
+
+- Remove implementation of `Clone` on `GenDnsConfig`. See [PR 2682].
+
+[PR 2682]: https://github.com/libp2p/rust-libp2p/pull/2682
+
+# 0.32.1
+
+- Update to `trust-dns` `v0.21`. See [PR 2543].
+
+[PR 2543]: https://github.com/libp2p/rust-libp2p/pull/2543
+
+# 0.32.0 [2022-02-22]
+
+- Update to `libp2p-core` `v0.32.0`.
+
+# 0.31.0 [2022-01-27]
+
+- Update dependencies.
+
+- Migrate to Rust edition 2021 (see [PR 2339]).
+
+[PR 2339]: https://github.com/libp2p/rust-libp2p/pull/2339
+
+# 0.30.0 [2021-11-01]
 
 - Make default features of `libp2p-core` optional.
   [PR 2181](https://github.com/libp2p/rust-libp2p/pull/2181)

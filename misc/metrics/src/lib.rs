@@ -25,24 +25,41 @@
 //!
 //! See `examples` directory for more.
 
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+
+#[cfg(feature = "dcutr")]
+mod dcutr;
+#[cfg(feature = "gossipsub")]
+#[cfg(not(target_os = "unknown"))]
+mod gossipsub;
 #[cfg(feature = "identify")]
 mod identify;
 #[cfg(feature = "kad")]
 mod kad;
 #[cfg(feature = "ping")]
 mod ping;
+mod protocol_stack;
+#[cfg(feature = "relay")]
+mod relay;
 mod swarm;
 
-use open_metrics_client::registry::Registry;
+use prometheus_client::registry::Registry;
 
 /// Set of Swarm and protocol metrics derived from emitted events.
 pub struct Metrics {
+    #[cfg(feature = "dcutr")]
+    dcutr: dcutr::Metrics,
+    #[cfg(feature = "gossipsub")]
+    #[cfg(not(target_os = "unknown"))]
+    gossipsub: gossipsub::Metrics,
     #[cfg(feature = "identify")]
     identify: identify::Metrics,
     #[cfg(feature = "kad")]
     kad: kad::Metrics,
     #[cfg(feature = "ping")]
     ping: ping::Metrics,
+    #[cfg(feature = "relay")]
+    relay: relay::Metrics,
     swarm: swarm::Metrics,
 }
 
@@ -50,7 +67,7 @@ impl Metrics {
     /// Create a new set of Swarm and protocol [`Metrics`].
     ///
     /// ```
-    /// use open_metrics_client::registry::Registry;
+    /// use prometheus_client::registry::Registry;
     /// use libp2p_metrics::Metrics;
     /// let mut registry = Registry::default();
     /// let metrics = Metrics::new(&mut registry);
@@ -58,12 +75,19 @@ impl Metrics {
     pub fn new(registry: &mut Registry) -> Self {
         let sub_registry = registry.sub_registry_with_prefix("libp2p");
         Self {
+            #[cfg(feature = "dcutr")]
+            dcutr: dcutr::Metrics::new(sub_registry),
+            #[cfg(feature = "gossipsub")]
+            #[cfg(not(target_os = "unknown"))]
+            gossipsub: gossipsub::Metrics::new(sub_registry),
             #[cfg(feature = "identify")]
             identify: identify::Metrics::new(sub_registry),
             #[cfg(feature = "kad")]
             kad: kad::Metrics::new(sub_registry),
             #[cfg(feature = "ping")]
             ping: ping::Metrics::new(sub_registry),
+            #[cfg(feature = "relay")]
+            relay: relay::Metrics::new(sub_registry),
             swarm: swarm::Metrics::new(sub_registry),
         }
     }
@@ -73,4 +97,56 @@ impl Metrics {
 pub trait Recorder<Event> {
     /// Record the given event.
     fn record(&self, event: &Event);
+}
+
+#[cfg(feature = "dcutr")]
+impl Recorder<libp2p_dcutr::Event> for Metrics {
+    fn record(&self, event: &libp2p_dcutr::Event) {
+        self.dcutr.record(event)
+    }
+}
+
+#[cfg(feature = "gossipsub")]
+#[cfg(not(target_os = "unknown"))]
+impl Recorder<libp2p_gossipsub::GossipsubEvent> for Metrics {
+    fn record(&self, event: &libp2p_gossipsub::GossipsubEvent) {
+        self.gossipsub.record(event)
+    }
+}
+
+#[cfg(feature = "identify")]
+impl Recorder<libp2p_identify::Event> for Metrics {
+    fn record(&self, event: &libp2p_identify::Event) {
+        self.identify.record(event)
+    }
+}
+
+#[cfg(feature = "kad")]
+impl Recorder<libp2p_kad::KademliaEvent> for Metrics {
+    fn record(&self, event: &libp2p_kad::KademliaEvent) {
+        self.kad.record(event)
+    }
+}
+
+#[cfg(feature = "ping")]
+impl Recorder<libp2p_ping::Event> for Metrics {
+    fn record(&self, event: &libp2p_ping::Event) {
+        self.ping.record(event)
+    }
+}
+
+#[cfg(feature = "relay")]
+impl Recorder<libp2p_relay::Event> for Metrics {
+    fn record(&self, event: &libp2p_relay::Event) {
+        self.relay.record(event)
+    }
+}
+
+impl<TBvEv, THandleErr> Recorder<libp2p_swarm::SwarmEvent<TBvEv, THandleErr>> for Metrics {
+    fn record(&self, event: &libp2p_swarm::SwarmEvent<TBvEv, THandleErr>) {
+        self.swarm.record(event);
+
+        #[cfg(feature = "identify")]
+        self.identify.record(event)
+    }
 }

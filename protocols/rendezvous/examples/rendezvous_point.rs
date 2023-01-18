@@ -19,16 +19,12 @@
 // DEALINGS IN THE SOFTWARE.
 
 use futures::StreamExt;
-use libp2p::core::identity;
-use libp2p::core::PeerId;
-use libp2p::identify::Identify;
-use libp2p::identify::IdentifyConfig;
-use libp2p::identify::IdentifyEvent;
-use libp2p::ping;
-use libp2p::ping::{Ping, PingEvent};
-use libp2p::swarm::{Swarm, SwarmEvent};
-use libp2p::NetworkBehaviour;
-use libp2p::{development_transport, rendezvous};
+use libp2p_core::{identity, upgrade::Version, PeerId, Transport};
+use libp2p_identify as identify;
+use libp2p_ping as ping;
+use libp2p_rendezvous as rendezvous;
+use libp2p_swarm::{keep_alive, NetworkBehaviour, Swarm, SwarmEvent};
+use void::Void;
 
 /// Examples for the rendezvous protocol:
 ///
@@ -46,15 +42,20 @@ async fn main() {
     let key = identity::ed25519::SecretKey::from_bytes(bytes).expect("we always pass 32 bytes");
     let identity = identity::Keypair::Ed25519(key.into());
 
-    let mut swarm = Swarm::new(
-        development_transport(identity.clone()).await.unwrap(),
+    let mut swarm = Swarm::with_tokio_executor(
+        libp2p_tcp::tokio::Transport::default()
+            .upgrade(Version::V1)
+            .authenticate(libp2p_noise::NoiseAuthenticated::xx(&identity).unwrap())
+            .multiplex(libp2p_yamux::YamuxConfig::default())
+            .boxed(),
         MyBehaviour {
-            identify: Identify::new(IdentifyConfig::new(
+            identify: identify::Behaviour::new(identify::Config::new(
                 "rendezvous-example/1.0.0".to_string(),
                 identity.public(),
             )),
             rendezvous: rendezvous::server::Behaviour::new(rendezvous::server::Config::default()),
-            ping: Ping::new(ping::Config::new().with_keep_alive(true)),
+            ping: ping::Behaviour::new(ping::Config::new()),
+            keep_alive: keep_alive::Behaviour,
         },
         PeerId::from(identity.public()),
     );
@@ -104,8 +105,8 @@ async fn main() {
 #[derive(Debug)]
 enum MyEvent {
     Rendezvous(rendezvous::server::Event),
-    Ping(PingEvent),
-    Identify(IdentifyEvent),
+    Ping(ping::Event),
+    Identify(identify::Event),
 }
 
 impl From<rendezvous::server::Event> for MyEvent {
@@ -114,23 +115,33 @@ impl From<rendezvous::server::Event> for MyEvent {
     }
 }
 
-impl From<PingEvent> for MyEvent {
-    fn from(event: PingEvent) -> Self {
+impl From<ping::Event> for MyEvent {
+    fn from(event: ping::Event) -> Self {
         MyEvent::Ping(event)
     }
 }
 
-impl From<IdentifyEvent> for MyEvent {
-    fn from(event: IdentifyEvent) -> Self {
+impl From<identify::Event> for MyEvent {
+    fn from(event: identify::Event) -> Self {
         MyEvent::Identify(event)
     }
 }
 
+impl From<Void> for MyEvent {
+    fn from(event: Void) -> Self {
+        void::unreachable(event)
+    }
+}
+
 #[derive(NetworkBehaviour)]
-#[behaviour(event_process = false)]
-#[behaviour(out_event = "MyEvent")]
+#[behaviour(
+    out_event = "MyEvent",
+    event_process = false,
+    prelude = "libp2p_swarm::derive_prelude"
+)]
 struct MyBehaviour {
-    identify: Identify,
+    identify: identify::Behaviour,
     rendezvous: rendezvous::server::Behaviour,
-    ping: Ping,
+    ping: ping::Behaviour,
+    keep_alive: keep_alive::Behaviour,
 }

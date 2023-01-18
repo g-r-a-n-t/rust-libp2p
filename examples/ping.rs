@@ -25,7 +25,7 @@
 //! In the first terminal window, run:
 //!
 //! ```sh
-//! cargo run --example ping
+//! cargo run --example ping --features=full
 //! ```
 //!
 //! It will print the PeerId and the listening addresses, e.g. `Listening on
@@ -34,34 +34,27 @@
 //! In the second terminal window, start a new instance of the example with:
 //!
 //! ```sh
-//! cargo run --example ping -- /ip4/127.0.0.1/tcp/24915
+//! cargo run --example ping --features=full -- /ip4/127.0.0.1/tcp/24915
 //! ```
 //!
 //! The two nodes establish a connection, negotiate the ping protocol
 //! and begin pinging each other.
 
-use futures::executor::block_on;
 use futures::prelude::*;
-use libp2p::swarm::{Swarm, SwarmEvent};
-use libp2p::{identity, ping, PeerId};
+use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
+use libp2p::{identity, ping, Multiaddr, PeerId};
+use libp2p_swarm::keep_alive;
 use std::error::Error;
-use std::task::Poll;
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[async_std::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
-    println!("Local peer id: {:?}", local_peer_id);
+    println!("Local peer id: {local_peer_id:?}");
 
-    let transport = block_on(libp2p::development_transport(local_key))?;
+    let transport = libp2p::development_transport(local_key).await?;
 
-    // Create a ping network behaviour.
-    //
-    // For illustrative purposes, the ping protocol is configured to
-    // keep the connection alive, so a continuous sequence of pings
-    // can be observed.
-    let behaviour = ping::Behaviour::new(ping::Config::new().with_keep_alive(true));
-
-    let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
+    let mut swarm = Swarm::with_async_std_executor(transport, Behaviour::default(), local_peer_id);
 
     // Tell the swarm to listen on all interfaces and a random, OS-assigned
     // port.
@@ -70,22 +63,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Dial the peer identified by the multi-address given as the second
     // command-line argument, if any.
     if let Some(addr) = std::env::args().nth(1) {
-        let remote = addr.parse()?;
-        swarm.dial_addr(remote)?;
-        println!("Dialed {}", addr)
+        let remote: Multiaddr = addr.parse()?;
+        swarm.dial(remote)?;
+        println!("Dialed {addr}")
     }
 
-    block_on(future::poll_fn(move |cx| loop {
-        match swarm.poll_next_unpin(cx) {
-            Poll::Ready(Some(event)) => match event {
-                SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {:?}", address),
-                SwarmEvent::Behaviour(event) => println!("{:?}", event),
-                _ => {}
-            },
-            Poll::Ready(None) => return Poll::Ready(()),
-            Poll::Pending => return Poll::Pending,
+    loop {
+        match swarm.select_next_some().await {
+            SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {address:?}"),
+            SwarmEvent::Behaviour(event) => println!("{event:?}"),
+            _ => {}
         }
-    }));
+    }
+}
 
-    Ok(())
+/// Our network behaviour.
+///
+/// For illustrative purposes, this includes the [`KeepAlive`](behaviour::KeepAlive) behaviour so a continuous sequence of
+/// pings can be observed.
+#[derive(NetworkBehaviour, Default)]
+struct Behaviour {
+    keep_alive: keep_alive::Behaviour,
+    ping: ping::Behaviour,
 }

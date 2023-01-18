@@ -32,6 +32,7 @@ use std::task::{Context, Poll};
 
 /// The state of an inbound substream (i.e. the remote node opened it).
 #[allow(clippy::large_enum_variant)]
+#[allow(clippy::enum_variant_names)]
 pub enum Stream {
     /// We are in the process of reading a message from the substream.
     PendingRead(Framed<NegotiatedSubstream, RendezvousCodec>),
@@ -54,6 +55,8 @@ impl fmt::Debug for Stream {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
 pub enum OutEvent {
     RegistrationRequested(NewRegistration),
@@ -94,7 +97,7 @@ impl SubstreamHandler for Stream {
         Stream::PendingRead(Framed::new(substream, RendezvousCodec::default()))
     }
 
-    fn inject_event(self, event: Self::InEvent) -> Self {
+    fn on_event(self, event: Self::InEvent) -> Self {
         match (event, self) {
             (InEvent::RegisterResponse { ttl }, Stream::PendingBehaviour(substream)) => {
                 Stream::PendingSend(substream, Message::RegisterResponse(Ok(ttl)))
@@ -113,7 +116,7 @@ impl SubstreamHandler for Stream {
                 Stream::PendingSend(substream, Message::DiscoverResponse(Err(error)))
             }
             (event, inbound) => {
-                debug_assert!(false, "{:?} cannot handle event {:?}", inbound, event);
+                debug_assert!(false, "{inbound:?} cannot handle event {event:?}");
 
                 inbound
             }

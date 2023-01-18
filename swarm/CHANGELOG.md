@@ -1,4 +1,402 @@
-# 0.31.0 [unreleased]
+# 0.42.0 [unreleased]
+
+- Update to `libp2p-core` `v0.39.0`.
+
+- Removed deprecated Swarm constructors. For transition notes see [0.41.0](#0.41.0). See [PR 3170].
+- Deprecate functions on `PollParameters` in preparation for `PollParameters` to be removed entirely eventually. See [PR 3153].
+
+- Add `estblished_in` to `SwarmEvent::ConnectionEstablished`. See [PR 3134].
+
+- Remove deprecated `inject_*` methods from `NetworkBehaviour` and `ConnectionHandler`.
+  see [PR 3264].
+
+- Update to `libp2p-swarm-derive` `v0.32.0`.
+
+- Remove type parameter from `PendingOutboundConnectionError` and `PendingInboundConnectionError`.
+  These two types are always used with `std::io::Error`. See [PR 3272].
+
+[PR 3170]: https://github.com/libp2p/rust-libp2p/pull/3170
+[PR 3134]: https://github.com/libp2p/rust-libp2p/pull/3134
+[PR 3153]: https://github.com/libp2p/rust-libp2p/pull/3153
+[PR 3264]: https://github.com/libp2p/rust-libp2p/pull/3264
+[PR 3272]: https://github.com/libp2p/rust-libp2p/pull/3272
+
+# 0.41.1
+
+- Update to `libp2p-swarm-derive` `v0.31.0`.
+
+# 0.41.0
+
+- Update to `libp2p-core` `v0.38.0`.
+
+- Add new `on_connection_event` method to `ConnectionHandler` that accepts a `ConnectionEvent` enum and update
+  `inject_*` methods to call `on_connection_event` with the respective `ConnectionEvent` variant and deprecate
+  `inject_*`.
+  To migrate, users should replace the `ConnectionHandler::inject_*` calls with a single
+  implementation of `ConnectionHandler::on_connection_event` treating each `ConnectionEvent` variant in
+  the same way its corresponding `inject_*` call was treated.
+  See [PR 3085].
+
+- Add new `on_behaviour_event` method with the same signature as `inject_event`, make the
+  default implementation of `inject_event` call `on_behaviour_event` and deprecate it.
+  To migrate, users should replace the `ConnectionHandler::inject_event` call
+  with `ConnectionHandler::on_behaviour_event`.
+  See [PR 3085].
+
+- Add new `on_swarm_event` method to `NetworkBehaviour` that accepts a `FromSwarm` enum and update
+  `inject_*` methods to call `on_swarm_event` with the respective `FromSwarm` variant and deprecate
+  `inject_*`.
+  To migrate, users should replace the `NetworkBehaviour::inject_*` calls with a single
+  implementation of `NetworkBehaviour::on_swarm_event` treating each `FromSwarm` variant in
+  the same way its corresponding `inject_*` call was treated.
+  See [PR 3011].
+
+- Add new `on_connection_handler_event` method with the same signature as `inject_event`, make the
+  default implementation of `inject_event` call `on_connection_handler_event` and deprecate it.
+  To migrate, users should replace the `NetworkBehaviour::inject_event` call
+  with `NetworkBehaviour::on_connection_handler_event`.
+  See [PR 3011].
+
+- Export `NetworkBehaviour` derive as `libp2p_swarm::NetworkBehaviour`.
+  This follows the convention of other popular libraries. `serde` for example exports the `Serialize` trait and macro as
+  `serde::Serialize`. See [PR 3055].
+
+- Feature-gate `NetworkBehaviour` macro behind `macros` feature flag. See [PR 3055].
+
+- Make executor in Swarm constructor explicit. See [PR 3097].
+
+  Supported executors:
+  - Tokio
+
+    Previously
+    ```rust
+    let swarm = SwarmBuilder::new(transport, behaviour, peer_id)
+        .executor(Box::new(|fut| {
+                tokio::spawn(fut);
+        }))
+        .build();
+    ```
+    Now
+    ```rust
+    let swarm = Swarm::with_tokio_executor(transport, behaviour, peer_id);
+    ```
+  - Async Std
+
+    Previously
+    ```rust
+    let swarm = SwarmBuilder::new(transport, behaviour, peer_id)
+        .executor(Box::new(|fut| {
+                async_std::task::spawn(fut);
+        }))
+        .build();
+    ```
+    Now
+    ```rust
+    let swarm = Swarm::with_async_std_executor(transport, behaviour, peer_id);
+    ```
+  - ThreadPool (see [Issue 3107])
+
+    In most cases ThreadPool can be replaced by executors or spawning on the local task.
+
+    Previously
+    ```rust
+    let swarm = Swarm::new(transport, behaviour, peer_id);
+    ```
+
+    Now
+    ```rust
+    let swarm = Swarm::with_threadpool_executor(transport, behaviour, peer_id);
+    ```
+  - Without
+
+    Spawns the tasks on the current task, this may result in bad performance so try to use an executor where possible. Previously this was just a fallback when no executor was specified and constructing a `ThreadPool` failed.
+
+    New
+    ```rust
+    let swarm = Swarm::without_executor(transport, behaviour, peer_id);
+    ```
+
+  Deprecated APIs:
+  - `Swarm::new`
+  - `SwarmBuilder::new`
+  - `SwarmBuilder::executor`
+
+- Update `rust-version` to reflect the actual MSRV: 1.62.0. See [PR 3090].
+
+[PR 3085]: https://github.com/libp2p/rust-libp2p/pull/3085
+[PR 3011]: https://github.com/libp2p/rust-libp2p/pull/3011
+[PR 3055]: https://github.com/libp2p/rust-libp2p/pull/3055
+[PR 3097]: https://github.com/libp2p/rust-libp2p/pull/3097
+[Issue 3107]: https://github.com/libp2p/rust-libp2p/issues/3107
+[PR 3090]: https://github.com/libp2p/rust-libp2p/pull/3090
+
+# 0.40.1
+
+- Bump rand to 0.8 and quickcheck to 1. See [PR 2857].
+
+- Update to `libp2p-core` `v0.37.0`.
+
+- Introduce `libp2p_swarm::keep_alive::ConnectionHandler` in favor of removing `keep_alive` from
+  `libp2p_swarm::dummy::ConnectionHandler`. `dummy::ConnectionHandler` now literally does not do anything. In the same
+  spirit, introduce `libp2p_swarm::keep_alive::Behaviour` and `libp2p_swarm::dummy::Behaviour`. See [PR 2859].
+
+[PR 2857]: https://github.com/libp2p/rust-libp2p/pull/2857
+[PR 2859]: https://github.com/libp2p/rust-libp2p/pull/2859/
+
+- Pass actual `PeerId` of dial to `NetworkBehaviour::inject_dial_failure` on `DialError::ConnectionLimit`. See [PR 2928].
+
+[PR 2928]: https://github.com/libp2p/rust-libp2p/pull/2928
+
+
+# 0.39.0
+
+- Remove deprecated `NetworkBehaviourEventProcess`. See [libp2p-swarm v0.38.0 changelog entry] for
+  migration path.
+
+- Update to `libp2p-core` `v0.36.0`.
+
+- Enforce backpressure on incoming streams via `StreamMuxer` interface. In case we hit the configured limit of maximum
+  number of inbound streams, we will stop polling the `StreamMuxer` for new inbound streams. Depending on the muxer
+  implementation in use, this may lead to instant dropping of inbound streams. See [PR 2861].
+
+[libp2p-swarm v0.38.0 changelog entry]: https://github.com/libp2p/rust-libp2p/blob/master/swarm/CHANGELOG.md#0380
+[PR 2861]: https://github.com/libp2p/rust-libp2p/pull/2861/
+
+# 0.38.0
+
+- Deprecate `NetworkBehaviourEventProcess`. When deriving `NetworkBehaviour` on a custom `struct` users
+  should either bring their own `OutEvent` via `#[behaviour(out_event = "MyBehaviourEvent")]` or,
+  when not specified, have the derive macro generate one for the user.
+
+  See [`NetworkBehaviour`
+  documentation](https://docs.rs/libp2p/latest/libp2p/swarm/trait.NetworkBehaviour.html) and [PR
+  2784] for details.
+
+  Previously
+
+  ``` rust
+  #[derive(NetworkBehaviour)]
+  #[behaviour(event_process = true)]
+  struct MyBehaviour {
+      gossipsub: Gossipsub,
+      mdns: Mdns,
+  }
+
+  impl NetworkBehaviourEventProcess<Gossipsub> for MyBehaviour {
+      fn inject_event(&mut self, message: GossipsubEvent) {
+        todo!("Handle event")
+      }
+  }
+
+  impl NetworkBehaviourEventProcess<MdnsEvent> for MyBehaviour {
+      fn inject_event(&mut self, message: MdnsEvent) {
+        todo!("Handle event")
+      }
+  }
+  ```
+
+  Now
+
+  ``` rust
+  #[derive(NetworkBehaviour)]
+  #[behaviour(out_event = "MyBehaviourEvent")]
+  struct MyBehaviour {
+      gossipsub: Gossipsub,
+      mdns: Mdns,
+  }
+
+  enum MyBehaviourEvent {
+      Gossipsub(GossipsubEvent),
+      Mdns(MdnsEvent),
+  }
+
+  impl From<GossipsubEvent> for MyBehaviourEvent {
+      fn from(event: GossipsubEvent) -> Self {
+          MyBehaviourEvent::Gossipsub(event)
+      }
+  }
+
+  impl From<MdnsEvent> for MyBehaviourEvent {
+      fn from(event: MdnsEvent) -> Self {
+          MyBehaviourEvent::Mdns(event)
+      }
+  }
+
+  match swarm.next().await.unwrap() {
+    SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(event)) => {
+      todo!("Handle event")
+    }
+    SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(event)) => {
+      todo!("Handle event")
+    }
+  }
+  ```
+
+- When deriving `NetworkBehaviour` on a custom `struct` where the user does not specify their own
+  `OutEvent` via `#[behaviour(out_event = "MyBehaviourEvent")]` and where the user does not enable
+  `#[behaviour(event_process = true)]`, then the derive macro generates an `OutEvent` definition for
+  the user.
+
+  See [`NetworkBehaviour`
+  documentation](https://docs.rs/libp2p/latest/libp2p/swarm/trait.NetworkBehaviour.html) and [PR
+  2792] for details.
+
+- Update dial address concurrency factor to `8`, thus dialing up to 8 addresses concurrently for a single connection attempt. See `Swarm::dial_concurrency_factor` and [PR 2741].
+
+- Update to `libp2p-core` `v0.35.0`.
+
+[PR 2741]: https://github.com/libp2p/rust-libp2p/pull/2741/
+[PR 2784]: https://github.com/libp2p/rust-libp2p/pull/2784
+[PR 2792]: https://github.com/libp2p/rust-libp2p/pull/2792
+
+# 0.37.0
+
+- Update to `libp2p-core` `v0.34.0`.
+
+- Extend log message when exceeding inbound negotiating streams with peer ID and limit. See [PR 2716].
+
+- Remove `connection::ListenersStream` and poll the `Transport` directly. See [PR 2652].
+
+[PR 2716]: https://github.com/libp2p/rust-libp2p/pull/2716/
+[PR 2652]: https://github.com/libp2p/rust-libp2p/pull/2652
+
+# 0.36.1
+
+- Limit negotiating inbound substreams per connection. See [PR 2697].
+
+[PR 2697]: https://github.com/libp2p/rust-libp2p/pull/2697
+
+# 0.36.0
+
+- Don't require `Transport` to be `Clone`. See [PR 2529].
+
+- Update to `libp2p-core` `v0.33.0`.
+
+- Make `behaviour::either` module private. See [PR 2610]
+
+- Rename `IncomingInfo::to_connected_point` to `IncomingInfo::create_connected_point`. See [PR 2620].
+
+- Rename `TProtoHandler` to `TConnectionHandler`, `ToggleProtoHandler` to `ToggleConnectionHandler`, `ToggleIntoProtoHandler` to `ToggleIntoConnectionHandler`. See [PR 2640].
+
+[PR 2529]: https://github.com/libp2p/rust-libp2p/pull/2529
+[PR 2610]: https://github.com/libp2p/rust-libp2p/pull/2610
+[PR 2620]: https://github.com/libp2p/rust-libp2p/pull/2620
+[PR 2640]: https://github.com/libp2p/rust-libp2p/pull/2640
+
+# 0.35.0
+
+- Add impl `IntoIterator` for `MultiHandler`. See [PR 2572].
+- Remove `Send` bound from `NetworkBehaviour`. See [PR 2535].
+
+[PR 2572]: https://github.com/libp2p/rust-libp2p/pull/2572/
+[PR 2535]: https://github.com/libp2p/rust-libp2p/pull/2535/
+
+# 0.34.0 [2022-02-22]
+
+- Rename `ProtocolsHandler` to `ConnectionHandler`. Upgrade should be as simple as renaming all
+  occurences of `ProtocolsHandler` to `ConnectionHandler` with your favorite text manipulation tool
+  across your codebase. See [PR 2527].
+
+- Fold `libp2p-core`'s `Network` into `Swarm`. See [PR 2492].
+
+- Update to `libp2p-core` `v0.32.0`.
+
+- Disconnect pending connections with `Swarm::disconnect`. See [PR 2517].
+
+- Report aborted connections via `SwarmEvent::OutgoingConnectionError`. See [PR 2517].
+
+[PR 2492]: https://github.com/libp2p/rust-libp2p/pull/2492
+[PR 2517]: https://github.com/libp2p/rust-libp2p/pull/2517
+[PR 2527]: https://github.com/libp2p/rust-libp2p/pull/2527
+
+# 0.33.0 [2022-01-27]
+
+- Patch reporting on banned peers and their non-banned and banned connections (see [PR 2350]).
+
+- Update dependencies.
+
+- Migrate to Rust edition 2021 (see [PR 2339]).
+
+- Update `Connection::address` on `inject_address_change` (see [PR 2362]).
+
+- Move `swarm::Toggle` to `swarm::behaviour::Toggle` (see [PR 2375]).
+
+- Add `Swarm::connected_peers` (see [PR 2378]).
+
+- Implement `swarm::NetworkBehaviour` on `either::Either` (see [PR 2370]).
+
+- Allow overriding _dial concurrency factor_ per dial via
+  `DialOpts::override_dial_concurrency_factor`. See [PR 2404].
+
+- Report negotiated and expected `PeerId` as well as remote address in
+  `DialError::WrongPeerId` (see [PR 2428]).
+
+- Allow overriding role when dialing through `override_role` option on
+  `DialOpts`. This option is needed for NAT and firewall hole punching. See [PR
+  2363].
+
+- Merge NetworkBehaviour's inject_\* paired methods (see PR 2445).
+
+[PR 2339]: https://github.com/libp2p/rust-libp2p/pull/2339
+[PR 2350]: https://github.com/libp2p/rust-libp2p/pull/2350
+[PR 2362]: https://github.com/libp2p/rust-libp2p/pull/2362
+[PR 2370]: https://github.com/libp2p/rust-libp2p/pull/2370
+[PR 2375]: https://github.com/libp2p/rust-libp2p/pull/2375
+[PR 2378]: https://github.com/libp2p/rust-libp2p/pull/2378
+[PR 2404]: https://github.com/libp2p/rust-libp2p/pull/2404
+[PR 2428]: https://github.com/libp2p/rust-libp2p/pull/2428
+[PR 2363]: https://github.com/libp2p/rust-libp2p/pull/2363
+[PR 2445]: https://github.com/libp2p/rust-libp2p/pull/2445
+
+# 0.32.0 [2021-11-16]
+
+- Use `instant` and `futures-timer` instead of `wasm-timer` (see [PR 2245]).
+
+- Enable advanced dialing requests both on `Swarm::dial` and via
+  `NetworkBehaviourAction::Dial`. Users can now trigger a dial with a specific
+  set of addresses, optionally extended via
+  `NetworkBehaviour::addresses_of_peer`.
+
+   Changes required to maintain status quo:
+
+  - Previously `swarm.dial(peer_id)`
+     now `swarm.dial(DialOpts::peer_id(peer_id).build())`
+     or `swarm.dial(peer_id)` given that `DialOpts` implements `From<PeerId>`.
+
+  - Previously `swarm.dial_addr(addr)`
+     now `swarm.dial(DialOpts::unknown_peer_id().address(addr).build())`
+     or `swarm.dial(addr)` given that `DialOpts` implements `From<Multiaddr>`.
+
+  - Previously `NetworkBehaviourAction::DialPeer { peer_id, condition, handler }`
+     now
+
+     ```rust
+     NetworkBehaviourAction::Dial {
+       opts: DialOpts::peer_id(peer_id)
+         .condition(condition)
+         .build(),
+       handler,
+     }
+     ```
+
+  - Previously `NetworkBehaviourAction::DialAddress { address, handler }`
+     now
+
+     ```rust
+     NetworkBehaviourAction::Dial {
+       opts: DialOpts::unknown_peer_id()
+         .address(address)
+         .build(),
+       handler,
+     }
+     ```
+
+   See [PR 2317].
+
+[PR 2245]: https://github.com/libp2p/rust-libp2p/pull/2245
+[PR 2317]: https://github.com/libp2p/rust-libp2p/pull/2317
+
+# 0.31.0 [2021-11-01]
 
 - Make default features of `libp2p-core` optional.
   [PR 2181](https://github.com/libp2p/rust-libp2p/pull/2181)
@@ -42,11 +440,33 @@
   parameters to `NetworkBehaviourAction<Self::OutEvent,
   Self::ProtocolsHandler>`. See [PR 2191].
 
+- Return `bool` instead of `Result<(), ()>` for `Swarm::remove_listener`(see
+  [PR 2261]).
+
+- Concurrently dial address candidates within a single dial attempt (see [PR 2248]) configured via
+  `Swarm::dial_concurrency_factor`.
+
+  - On success of a single address, report errors of the thus far failed dials via
+    `SwarmEvent::ConnectionEstablished::outgoing`.
+
+  - On failure of all addresses, report errors via the new `SwarmEvent::OutgoingConnectionError`.
+
+  - Remove `SwarmEvent::UnreachableAddr` and `SwarmEvent::UnknownPeerUnreachableAddr` event.
+
+  - In `NetworkBehaviour::inject_connection_established` provide errors of all thus far failed addresses.
+
+  - On unknown peer dial failures, call `NetworkBehaviour::inject_dial_failure` with a peer ID of `None`.
+
+  - Remove `NetworkBehaviour::inject_addr_reach_failure`. Information is now provided via
+    `NetworkBehaviour::inject_connection_established` and `NetworkBehaviour::inject_dial_failure`.
+
 [PR 2150]: https://github.com/libp2p/rust-libp2p/pull/2150
 [PR 2182]: https://github.com/libp2p/rust-libp2p/pull/2182
 [PR 2183]: https://github.com/libp2p/rust-libp2p/pull/2183
 [PR 2192]: https://github.com/libp2p/rust-libp2p/pull/2192
 [PR 2191]: https://github.com/libp2p/rust-libp2p/pull/2191
+[PR 2248]: https://github.com/libp2p/rust-libp2p/pull/2248
+[PR 2261]: https://github.com/libp2p/rust-libp2p/pull/2261
 
 # 0.30.0 [2021-07-12]
 

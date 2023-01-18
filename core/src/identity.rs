@@ -32,8 +32,10 @@
 //! (e.g. [ed25519 binary format](https://datatracker.ietf.org/doc/html/rfc8032#section-5.1.5)).
 //! All key types have functions to enable conversion to/from their binary representations.
 
+#[cfg(feature = "ecdsa")]
+pub mod ecdsa;
 pub mod ed25519;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "rsa", not(target_arch = "wasm32")))]
 pub mod rsa;
 #[cfg(feature = "secp256k1")]
 pub mod secp256k1;
@@ -61,16 +63,20 @@ use std::convert::{TryFrom, TryInto};
 /// let keypair = Keypair::rsa_from_pkcs8(&mut bytes);
 /// ```
 ///
-#[derive(Clone)]
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Keypair {
     /// An Ed25519 keypair.
     Ed25519(ed25519::Keypair),
-    #[cfg(not(target_arch = "wasm32"))]
     /// An RSA keypair.
+    #[cfg(all(feature = "rsa", not(target_arch = "wasm32")))]
     Rsa(rsa::Keypair),
     /// A Secp256k1 keypair.
     #[cfg(feature = "secp256k1")]
     Secp256k1(secp256k1::Keypair),
+    /// An ECDSA keypair.
+    #[cfg(feature = "ecdsa")]
+    Ecdsa(ecdsa::Keypair),
 }
 
 impl Keypair {
@@ -85,11 +91,17 @@ impl Keypair {
         Keypair::Secp256k1(secp256k1::Keypair::generate())
     }
 
+    /// Generate a new ECDSA keypair.
+    #[cfg(feature = "ecdsa")]
+    pub fn generate_ecdsa() -> Keypair {
+        Keypair::Ecdsa(ecdsa::Keypair::generate())
+    }
+
     /// Decode an keypair from a DER-encoded secret key in PKCS#8 PrivateKeyInfo
     /// format (i.e. unencrypted) as defined in [RFC5208].
     ///
     /// [RFC5208]: https://tools.ietf.org/html/rfc5208#section-5
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "rsa", not(target_arch = "wasm32")))]
     pub fn rsa_from_pkcs8(pkcs8_der: &mut [u8]) -> Result<Keypair, DecodingError> {
         rsa::Keypair::from_pkcs8(pkcs8_der).map(Keypair::Rsa)
     }
@@ -110,10 +122,12 @@ impl Keypair {
         use Keypair::*;
         match self {
             Ed25519(ref pair) => Ok(pair.sign(msg)),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "rsa", not(target_arch = "wasm32")))]
             Rsa(ref pair) => pair.sign(msg),
             #[cfg(feature = "secp256k1")]
             Secp256k1(ref pair) => pair.secret().sign(msg),
+            #[cfg(feature = "ecdsa")]
+            Ecdsa(ref pair) => Ok(pair.secret().sign(msg)),
         }
     }
 
@@ -122,10 +136,12 @@ impl Keypair {
         use Keypair::*;
         match self {
             Ed25519(pair) => PublicKey::Ed25519(pair.public()),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "rsa", not(target_arch = "wasm32")))]
             Rsa(pair) => PublicKey::Rsa(pair.public()),
             #[cfg(feature = "secp256k1")]
             Secp256k1(pair) => PublicKey::Secp256k1(pair.public().clone()),
+            #[cfg(feature = "ecdsa")]
+            Ecdsa(pair) => PublicKey::Ecdsa(pair.public().clone()),
         }
     }
 
@@ -138,18 +154,12 @@ impl Keypair {
                 r#type: keys_proto::KeyType::Ed25519.into(),
                 data: data.encode().into(),
             },
-            #[cfg(not(target_arch = "wasm32"))]
-            Self::Rsa(_) => {
-                return Err(DecodingError::new(
-                    "Encoding RSA key into Protobuf is unsupported",
-                ))
-            }
+            #[cfg(all(feature = "rsa", not(target_arch = "wasm32")))]
+            Self::Rsa(_) => return Err(DecodingError::encoding_unsupported("RSA")),
             #[cfg(feature = "secp256k1")]
-            Self::Secp256k1(_) => {
-                return Err(DecodingError::new(
-                    "Encoding Secp256k1 key into Protobuf is unsupported",
-                ))
-            }
+            Self::Secp256k1(_) => return Err(DecodingError::encoding_unsupported("secp256k1")),
+            #[cfg(feature = "ecdsa")]
+            Self::Ecdsa(_) => return Err(DecodingError::encoding_unsupported("ECDSA")),
         };
 
         Ok(pk.encode_to_vec())
@@ -160,23 +170,19 @@ impl Keypair {
         use prost::Message;
 
         let mut private_key = keys_proto::PrivateKey::decode(bytes)
-            .map_err(|e| DecodingError::new("Protobuf").source(e))
+            .map_err(|e| DecodingError::bad_protobuf("private key bytes", e))
             .map(zeroize::Zeroizing::new)?;
 
-        let key_type = keys_proto::KeyType::from_i32(private_key.r#type).ok_or_else(|| {
-            DecodingError::new(format!("unknown key type: {}", private_key.r#type))
-        })?;
+        let key_type = keys_proto::KeyType::from_i32(private_key.r#type)
+            .ok_or_else(|| DecodingError::unknown_key_type(private_key.r#type))?;
 
         match key_type {
             keys_proto::KeyType::Ed25519 => {
                 ed25519::Keypair::decode(&mut private_key.data).map(Keypair::Ed25519)
             }
-            keys_proto::KeyType::Rsa => Err(DecodingError::new(
-                "Decoding RSA key from Protobuf is unsupported.",
-            )),
-            keys_proto::KeyType::Secp256k1 => Err(DecodingError::new(
-                "Decoding Secp256k1 key from Protobuf is unsupported.",
-            )),
+            keys_proto::KeyType::Rsa => Err(DecodingError::decoding_unsupported("RSA")),
+            keys_proto::KeyType::Secp256k1 => Err(DecodingError::decoding_unsupported("secp256k1")),
+            keys_proto::KeyType::Ecdsa => Err(DecodingError::decoding_unsupported("ECDSA")),
         }
     }
 }
@@ -189,16 +195,19 @@ impl zeroize::Zeroize for keys_proto::PrivateKey {
 }
 
 /// The public key of a node's identity keypair.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PublicKey {
     /// A public Ed25519 key.
     Ed25519(ed25519::PublicKey),
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "rsa", not(target_arch = "wasm32")))]
     /// A public RSA key.
     Rsa(rsa::PublicKey),
     #[cfg(feature = "secp256k1")]
     /// A public Secp256k1 key.
     Secp256k1(secp256k1::PublicKey),
+    /// A public ECDSA key.
+    #[cfg(feature = "ecdsa")]
+    Ecdsa(ecdsa::PublicKey),
 }
 
 impl PublicKey {
@@ -211,10 +220,12 @@ impl PublicKey {
         use PublicKey::*;
         match self {
             Ed25519(pk) => pk.verify(msg, sig),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "rsa", not(target_arch = "wasm32")))]
             Rsa(pk) => pk.verify(msg, sig),
             #[cfg(feature = "secp256k1")]
             Secp256k1(pk) => pk.verify(msg, sig),
+            #[cfg(feature = "ecdsa")]
+            Ecdsa(pk) => pk.verify(msg, sig),
         }
     }
 
@@ -238,7 +249,7 @@ impl PublicKey {
         use prost::Message;
 
         let pubkey = keys_proto::PublicKey::decode(bytes)
-            .map_err(|e| DecodingError::new("Protobuf").source(e))?;
+            .map_err(|e| DecodingError::bad_protobuf("public key bytes", e))?;
 
         pubkey.try_into()
     }
@@ -256,7 +267,7 @@ impl From<&PublicKey> for keys_proto::PublicKey {
                 r#type: keys_proto::KeyType::Ed25519 as i32,
                 data: key.encode().to_vec(),
             },
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "rsa", not(target_arch = "wasm32")))]
             PublicKey::Rsa(key) => keys_proto::PublicKey {
                 r#type: keys_proto::KeyType::Rsa as i32,
                 data: key.encode_x509(),
@@ -265,6 +276,11 @@ impl From<&PublicKey> for keys_proto::PublicKey {
             PublicKey::Secp256k1(key) => keys_proto::PublicKey {
                 r#type: keys_proto::KeyType::Secp256k1 as i32,
                 data: key.encode().to_vec(),
+            },
+            #[cfg(feature = "ecdsa")]
+            PublicKey::Ecdsa(key) => keys_proto::PublicKey {
+                r#type: keys_proto::KeyType::Ecdsa as i32,
+                data: key.encode_der(),
             },
         }
     }
@@ -275,20 +291,20 @@ impl TryFrom<keys_proto::PublicKey> for PublicKey {
 
     fn try_from(pubkey: keys_proto::PublicKey) -> Result<Self, Self::Error> {
         let key_type = keys_proto::KeyType::from_i32(pubkey.r#type)
-            .ok_or_else(|| DecodingError::new(format!("unknown key type: {}", pubkey.r#type)))?;
+            .ok_or_else(|| DecodingError::unknown_key_type(pubkey.r#type))?;
 
         match key_type {
             keys_proto::KeyType::Ed25519 => {
                 ed25519::PublicKey::decode(&pubkey.data).map(PublicKey::Ed25519)
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "rsa", not(target_arch = "wasm32")))]
             keys_proto::KeyType::Rsa => {
                 rsa::PublicKey::decode_x509(&pubkey.data).map(PublicKey::Rsa)
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(any(not(feature = "rsa"), target_arch = "wasm32"))]
             keys_proto::KeyType::Rsa => {
                 log::debug!("support for RSA was disabled at compile-time");
-                Err(DecodingError::new("Unsupported"))
+                Err(DecodingError::missing_feature("rsa"))
             }
             #[cfg(feature = "secp256k1")]
             keys_proto::KeyType::Secp256k1 => {
@@ -297,7 +313,16 @@ impl TryFrom<keys_proto::PublicKey> for PublicKey {
             #[cfg(not(feature = "secp256k1"))]
             keys_proto::KeyType::Secp256k1 => {
                 log::debug!("support for secp256k1 was disabled at compile-time");
-                Err(DecodingError::new("Unsupported"))
+                Err(DecodingError::missing_feature("secp256k1"))
+            }
+            #[cfg(feature = "ecdsa")]
+            keys_proto::KeyType::Ecdsa => {
+                ecdsa::PublicKey::decode_der(&pubkey.data).map(PublicKey::Ecdsa)
+            }
+            #[cfg(not(feature = "ecdsa"))]
+            keys_proto::KeyType::Ecdsa => {
+                log::debug!("support for ECDSA was disabled at compile-time");
+                Err(DecodingError::missing_feature("ecdsa"))
             }
         }
     }
@@ -334,5 +359,23 @@ mod tests {
         let peer_id = keypair.public().to_peer_id();
 
         assert_eq!(expected_peer_id, peer_id);
+    }
+
+    #[test]
+    fn public_key_implements_hash() {
+        use std::hash::Hash;
+
+        fn assert_implements_hash<T: Hash>() {}
+
+        assert_implements_hash::<PublicKey>();
+    }
+
+    #[test]
+    fn public_key_implements_ord() {
+        use std::cmp::Ord;
+
+        fn assert_implements_ord<T: Ord>() {}
+
+        assert_implements_ord::<PublicKey>();
     }
 }

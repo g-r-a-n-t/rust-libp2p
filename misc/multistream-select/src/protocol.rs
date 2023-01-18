@@ -179,7 +179,7 @@ impl Message {
 
         // If it starts with a `/`, ends with a line feed without any
         // other line feeds in-between, it must be a protocol name.
-        if msg.get(0) == Some(&b'/')
+        if msg.first() == Some(&b'/')
             && msg.last() == Some(&b'\n')
             && !msg[..msg.len() - 1].contains(&b'\n')
         {
@@ -443,7 +443,7 @@ impl Error for ProtocolError {
 impl fmt::Display for ProtocolError {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self {
-            ProtocolError::IoError(e) => write!(fmt, "I/O error: {}", e),
+            ProtocolError::IoError(e) => write!(fmt, "I/O error: {e}"),
             ProtocolError::InvalidMessage => write!(fmt, "Received an invalid message."),
             ProtocolError::InvalidProtocol => write!(fmt, "A protocol (name) is invalid."),
             ProtocolError::TooManyProtocols => write!(fmt, "Too many protocols received."),
@@ -455,24 +455,23 @@ impl fmt::Display for ProtocolError {
 mod tests {
     use super::*;
     use quickcheck::*;
-    use rand::distributions::Alphanumeric;
-    use rand::Rng;
     use std::iter;
 
     impl Arbitrary for Protocol {
-        fn arbitrary<G: Gen>(g: &mut G) -> Protocol {
-            let n = g.gen_range(1, g.size());
+        fn arbitrary(g: &mut Gen) -> Protocol {
+            let n = g.gen_range(1..g.size());
             let p: String = iter::repeat(())
-                .map(|()| g.sample(Alphanumeric))
+                .map(|()| char::arbitrary(g))
+                .filter(|&c| c.is_ascii_alphanumeric())
                 .take(n)
                 .collect();
-            Protocol(Bytes::from(format!("/{}", p)))
+            Protocol(Bytes::from(format!("/{p}")))
         }
     }
 
     impl Arbitrary for Message {
-        fn arbitrary<G: Gen>(g: &mut G) -> Message {
-            match g.gen_range(0, 5) {
+        fn arbitrary(g: &mut Gen) -> Message {
+            match g.gen_range(0..5u8) {
                 0 => Message::Header(HeaderLine::V1),
                 1 => Message::NotAvailable,
                 2 => Message::ListProtocols,
@@ -488,10 +487,10 @@ mod tests {
         fn prop(msg: Message) {
             let mut buf = BytesMut::new();
             msg.encode(&mut buf)
-                .expect(&format!("Encoding message failed: {:?}", msg));
+                .unwrap_or_else(|_| panic!("Encoding message failed: {msg:?}"));
             match Message::decode(buf.freeze()) {
                 Ok(m) => assert_eq!(m, msg),
-                Err(e) => panic!("Decoding failed: {:?}", e),
+                Err(e) => panic!("Decoding failed: {e:?}"),
             }
         }
         quickcheck(prop as fn(_))

@@ -26,7 +26,8 @@ use std::collections::hash_map::{
     Entry::{Occupied, Vacant},
 };
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use wasm_timer::Instant;
 
 struct ExpiringElement<Element> {
     /// The element that expires
@@ -171,12 +172,16 @@ where
         self.list.clear();
     }
 
-    pub fn contains_key(&mut self, key: &Key) -> bool {
+    pub fn contains_key(&self, key: &Key) -> bool {
         self.map.contains_key(key)
     }
 
     pub fn get(&self, key: &Key) -> Option<&Value> {
         self.map.get(key).map(|e| &e.element)
+    }
+
+    pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value> {
+        self.map.get_mut(key).map(|e| &mut e.element)
     }
 }
 
@@ -203,7 +208,7 @@ where
         }
     }
 
-    pub fn contains(&mut self, key: &Key) -> bool {
+    pub fn contains(&self, key: &Key) -> bool {
         self.0.contains_key(key)
     }
 }

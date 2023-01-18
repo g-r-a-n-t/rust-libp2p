@@ -18,13 +18,15 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+//! Implementation of the [Gossipsub](https://github.com/libp2p/specs/blob/master/pubsub/gossipsub/README.md) protocol.
+//!
 //! Gossipsub is a P2P pubsub (publish/subscription) routing layer designed to extend upon
 //! floodsub and meshsub routing protocols.
 //!
 //! # Overview
 //!
 //! *Note: The gossipsub protocol specifications
-//! (https://github.com/libp2p/specs/tree/master/pubsub/gossipsub) provide an outline for the
+//! (<https://github.com/libp2p/specs/tree/master/pubsub/gossipsub>) provide an outline for the
 //! routing protocol. They should be consulted for further detail.*
 //!
 //! Gossipsub  is a blend of meshsub for data and randomsub for mesh metadata. It provides bounded
@@ -50,6 +52,18 @@
 //! this implementation are sent as raw bytes across the wire. They are 64-bit big-endian unsigned
 //! integers. They are chosen at random in this implementation of gossipsub, but are sequential in
 //! the current go implementation.
+//!
+//! # Peer Discovery
+//!
+//! Gossipsub does not provide peer discovery by itself. Peer discovery is the process by which
+//! peers in a p2p network exchange information about each other among other reasons to become resistant
+//! against the failure or replacement of the
+//! [boot nodes](https://docs.libp2p.io/reference/glossary/#boot-node) of the network.
+//!
+//! Peer
+//! discovery can e.g. be implemented with the help of the [Kademlia](https://github.com/libp2p/specs/blob/master/kad-dht/README.md) protocol
+//! in combination with the [Identify](https://github.com/libp2p/specs/tree/master/identify) protocol. See the
+//! Kademlia implementation documentation for more information.
 //!
 //! # Using Gossipsub
 //!
@@ -85,10 +99,9 @@
 //!
 //! // Set up an encrypted TCP Transport over the Mplex
 //! // This is test transport (memory).
-//! let noise_keys = libp2p_noise::Keypair::<libp2p_noise::X25519Spec>::new().into_authentic(&local_key).unwrap();
 //! let transport = MemoryTransport::default()
 //!            .upgrade(libp2p_core::upgrade::Version::V1)
-//!            .authenticate(libp2p_noise::NoiseConfig::xx(noise_keys).into_authenticated())
+//!            .authenticate(libp2p_noise::NoiseAuthenticated::xx(&local_key).unwrap())
 //!            .multiplex(libp2p_mplex::MplexConfig::new())
 //!            .boxed();
 //!
@@ -108,8 +121,8 @@
 //!         libp2p_gossipsub::Gossipsub::new(message_authenticity, gossipsub_config).unwrap();
 //!     // subscribe to the topic
 //!     gossipsub.subscribe(&topic);
-//!     // create the swarm
-//!     libp2p_swarm::Swarm::new(
+//!     // create the swarm (use an executor in a real example)
+//!     libp2p_swarm::Swarm::without_executor(
 //!         transport,
 //!         gossipsub,
 //!         local_peer_id,
@@ -122,6 +135,8 @@
 //! println!("Listening on {:?}", addr);
 //! ```
 
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+
 pub mod error;
 pub mod protocol;
 
@@ -131,6 +146,7 @@ mod config;
 mod gossip_promises;
 mod handler;
 mod mcache;
+pub mod metrics;
 mod peer_score;
 pub mod subscription_filter;
 pub mod time_cache;
@@ -138,16 +154,12 @@ mod topic;
 mod transform;
 mod types;
 
-#[cfg(test)]
-#[macro_use]
-extern crate derive_builder;
-
 mod rpc_proto;
 
 pub use self::behaviour::{Gossipsub, GossipsubEvent, MessageAuthenticity};
 pub use self::transform::{DataTransform, IdentityTransform};
 
-pub use self::config::{GossipsubConfig, GossipsubConfigBuilder, ValidationMode};
+pub use self::config::{GossipsubConfig, GossipsubConfigBuilder, GossipsubVersion, ValidationMode};
 pub use self::peer_score::{
     score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams, PeerScoreThresholds,
     TopicScoreParams,

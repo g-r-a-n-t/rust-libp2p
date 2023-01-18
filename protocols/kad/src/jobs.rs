@@ -63,13 +63,14 @@
 
 use crate::record::{self, store::RecordStore, ProviderRecord, Record};
 use futures::prelude::*;
+use futures_timer::Delay;
+use instant::Instant;
 use libp2p_core::PeerId;
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use std::vec;
-use wasm_timer::{Delay, Instant};
 
 /// The maximum number of queries towards which background jobs
 /// are allowed to start new queries on an invocation of
@@ -99,15 +100,15 @@ impl<T> PeriodicJob<T> {
     /// for the delay to expire.
     fn asap(&mut self) {
         if let PeriodicJobState::Waiting(delay, deadline) = &mut self.state {
-            let new_deadline = Instant::now() - Duration::from_secs(1);
+            let new_deadline = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
             *deadline = new_deadline;
-            delay.reset_at(new_deadline);
+            delay.reset(Duration::from_secs(1));
         }
     }
 
     /// Returns `true` if the job is currently not running but ready
     /// to be run, `false` otherwise.
-    fn is_ready(&mut self, cx: &mut Context<'_>, now: Instant) -> bool {
+    fn check_ready(&mut self, cx: &mut Context<'_>, now: Instant) -> bool {
         if let PeriodicJobState::Waiting(delay, deadline) = &mut self.state {
             if now >= *deadline || !Future::poll(Pin::new(delay), cx).is_pending() {
                 return true;
@@ -148,7 +149,7 @@ impl PutRecordJob {
     ) -> Self {
         let now = Instant::now();
         let deadline = now + replicate_interval;
-        let delay = Delay::new_at(deadline);
+        let delay = Delay::new(replicate_interval);
         let next_publish = publish_interval.map(|i| now + i);
         Self {
             local_id,
@@ -180,7 +181,7 @@ impl PutRecordJob {
     /// The job is guaranteed to run on the next invocation of `poll`.
     pub fn asap(&mut self, publish: bool) {
         if publish {
-            self.next_publish = Some(Instant::now() - Duration::from_secs(1))
+            self.next_publish = Some(Instant::now().checked_sub(Duration::from_secs(1)).unwrap())
         }
         self.inner.asap()
     }
@@ -192,9 +193,9 @@ impl PutRecordJob {
     /// to be run.
     pub fn poll<T>(&mut self, cx: &mut Context<'_>, store: &mut T, now: Instant) -> Poll<Record>
     where
-        for<'a> T: RecordStore<'a>,
+        T: RecordStore,
     {
-        if self.inner.is_ready(cx, now) {
+        if self.inner.check_ready(cx, now) {
             let publish = self.next_publish.map_or(false, |t_pub| now >= t_pub);
             let records = store
                 .records()
@@ -236,9 +237,9 @@ impl PutRecordJob {
 
             // Wait for the next run.
             let deadline = now + self.inner.interval;
-            let delay = Delay::new_at(deadline);
+            let delay = Delay::new(self.inner.interval);
             self.inner.state = PeriodicJobState::Waiting(delay, deadline);
-            assert!(!self.inner.is_ready(cx, now));
+            assert!(!self.inner.check_ready(cx, now));
         }
 
         Poll::Pending
@@ -262,7 +263,7 @@ impl AddProviderJob {
                 interval,
                 state: {
                     let deadline = now + interval;
-                    PeriodicJobState::Waiting(Delay::new_at(deadline), deadline)
+                    PeriodicJobState::Waiting(Delay::new(interval), deadline)
                 },
             },
         }
@@ -293,9 +294,9 @@ impl AddProviderJob {
         now: Instant,
     ) -> Poll<ProviderRecord>
     where
-        for<'a> T: RecordStore<'a>,
+        T: RecordStore,
     {
-        if self.inner.is_ready(cx, now) {
+        if self.inner.check_ready(cx, now) {
             let records = store
                 .provided()
                 .map(|r| r.into_owned())
@@ -314,9 +315,9 @@ impl AddProviderJob {
             }
 
             let deadline = now + self.inner.interval;
-            let delay = Delay::new_at(deadline);
+            let delay = Delay::new(self.inner.interval);
             self.inner.state = PeriodicJobState::Waiting(delay, deadline);
-            assert!(!self.inner.is_ready(cx, now));
+            assert!(!self.inner.check_ready(cx, now));
         }
 
         Poll::Pending
@@ -334,15 +335,15 @@ mod tests {
     fn rand_put_record_job() -> PutRecordJob {
         let mut rng = rand::thread_rng();
         let id = PeerId::random();
-        let replicate_interval = Duration::from_secs(rng.gen_range(1, 60));
-        let publish_interval = Some(replicate_interval * rng.gen_range(1, 10));
-        let record_ttl = Some(Duration::from_secs(rng.gen_range(1, 600)));
-        PutRecordJob::new(id.clone(), replicate_interval, publish_interval, record_ttl)
+        let replicate_interval = Duration::from_secs(rng.gen_range(1..60));
+        let publish_interval = Some(replicate_interval * rng.gen_range(1..10));
+        let record_ttl = Some(Duration::from_secs(rng.gen_range(1..600)));
+        PutRecordJob::new(id, replicate_interval, publish_interval, record_ttl)
     }
 
     fn rand_add_provider_job() -> AddProviderJob {
         let mut rng = rand::thread_rng();
-        let interval = Duration::from_secs(rng.gen_range(1, 60));
+        let interval = Duration::from_secs(rng.gen_range(1..60));
         AddProviderJob::new(interval)
     }
 
@@ -359,7 +360,7 @@ mod tests {
         fn prop(records: Vec<Record>) {
             let mut job = rand_put_record_job();
             // Fill a record store.
-            let mut store = MemoryStore::new(job.local_id.clone());
+            let mut store = MemoryStore::new(job.local_id);
             for r in records {
                 let _ = store.put(r);
             }
@@ -388,9 +389,9 @@ mod tests {
             let mut job = rand_add_provider_job();
             let id = PeerId::random();
             // Fill a record store.
-            let mut store = MemoryStore::new(id.clone());
+            let mut store = MemoryStore::new(id);
             for mut r in records {
-                r.provider = id.clone();
+                r.provider = id;
                 let _ = store.add_provider(r);
             }
 

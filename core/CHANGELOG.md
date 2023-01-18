@@ -1,4 +1,205 @@
-# 0.30.0 [unreleased]
+# 0.39.0 [unreleased]
+
+- Move `ConnectionId` to `libp2p-swarm`. See [PR 3221].
+- Move `PendingPoint` to `libp2p-swarm` and make it crate-private. See [PR 3221].
+
+[PR 3221]: https://github.com/libp2p/rust-libp2p/pull/3221
+
+# 0.38.0
+
+- Remove deprecated functions `StreamMuxerExt::next_{inbound,outbound}`. See [PR 3031].
+
+- Hide `prost::Error` from public API in `FromEnvelopeError::InvalidPeerRecord` and `signed_envelope::DecodingError`. See [PR 3058].
+
+- Move `Executor` to `libp2p-swarm`. See [PR 3097].
+
+- Update `rust-version` to reflect the actual MSRV: 1.60.0. See [PR 3090].
+
+- Update `multistream-select` to `v0.12.1`. See [PR 3090].
+
+- Improve error messages in case keys cannot be decoded because of missing feature flags. See [PR 2972].
+
+- Remove `EitherError` in favor of `either::Either`. See [PR 3337].
+
+- Remove `EitherTransport` in favor of implementing `Transport` on `either::Either`. See [PR 3338].
+
+- Remove `EitherUpgrade` in favor of implementing `UpgradeInfo`, `InboundUpgrade` and `OutboundUpgrade` on `either::Either`. See [PR 3339].
+
+- Remove `EitherFuture2` in favor of `EitherFuture`. See [PR 3340].
+
+[PR 3031]: https://github.com/libp2p/rust-libp2p/pull/3031
+[PR 3058]: https://github.com/libp2p/rust-libp2p/pull/3058
+[PR 3097]: https://github.com/libp2p/rust-libp2p/pull/3097
+[PR 3090]: https://github.com/libp2p/rust-libp2p/pull/3090
+[PR 2972]: https://github.com/libp2p/rust-libp2p/pull/2972
+[PR 3337]: https://github.com/libp2p/rust-libp2p/pull/3337
+[PR 3338]: https://github.com/libp2p/rust-libp2p/pull/3338
+[PR 3339]: https://github.com/libp2p/rust-libp2p/pull/3339
+[PR 3340]: https://github.com/libp2p/rust-libp2p/pull/3340
+
+# 0.37.0
+
+- Implement `Hash` and `Ord` for `PublicKey`. See [PR 2915].
+
+- Remove default features. If you previously depended on `secp256k1` or `ecdsa` you need to enable these explicitly
+  now. See [PR 2918].
+
+- Deprecate `StreamMuxerExt::next_{inbound,outbound}`. See [PR 3002].
+
+[PR 2915]: https://github.com/libp2p/rust-libp2p/pull/2915
+[PR 2918]: https://github.com/libp2p/rust-libp2p/pull/2918
+[PR 3002]: https://github.com/libp2p/rust-libp2p/pull/3002
+
+# 0.36.0
+
+- Make RSA keypair support optional. To enable RSA support, `rsa` feature should be enabled.
+  See [PR 2860].
+
+- Add `ReadyUpgrade`. See [PR 2855].
+
+[PR 2855]: https://github.com/libp2p/rust-libp2p/pull/2855
+[PR 2860]: https://github.com/libp2p/rust-libp2p/pull/2860/
+
+# 0.35.1
+
+- Update to `p256` `v0.11.0`. See [PR 2636].
+
+[PR 2636]: https://github.com/libp2p/rust-libp2p/pull/2636/
+
+# 0.35.0
+
+- Update prost requirement from 0.10 to 0.11 which no longer installs the protoc Protobuf compiler.
+  Thus you will need protoc installed locally. See [PR 2788].
+- Drop `Unpin` requirement from `SubstreamBox`. See [PR 2762] and [PR 2776].
+- Drop `Sync` requirement on `StreamMuxer` for constructing `StreamMuxerBox`. See [PR 2775].
+- Use `Pin<&mut Self>` as the receiver type for all `StreamMuxer` poll functions. See [PR 2765].
+- Change `StreamMuxer` interface to be entirely poll-based. All functions on `StreamMuxer` now
+  require a `Context` and return `Poll`. This gives callers fine-grained control over what they
+  would like to make progress on. See [PR 2724] and [PR 2797].
+
+[PR 2724]: https://github.com/libp2p/rust-libp2p/pull/2724
+[PR 2762]: https://github.com/libp2p/rust-libp2p/pull/2762
+[PR 2775]: https://github.com/libp2p/rust-libp2p/pull/2775
+[PR 2776]: https://github.com/libp2p/rust-libp2p/pull/2776
+[PR 2765]: https://github.com/libp2p/rust-libp2p/pull/2765
+[PR 2797]: https://github.com/libp2p/rust-libp2p/pull/2797
+[PR 2788]: https://github.com/libp2p/rust-libp2p/pull/2788
+
+# 0.34.0
+
+- Remove `{read,write,flush,shutdown,destroy}_substream` functions from `StreamMuxer` trait
+  in favor of forcing `StreamMuxer::Substream` to implement `AsyncRead + AsyncWrite`. See [PR 2707].
+- Replace `Into<std::io::Error>` bound on `StreamMuxer::Error` with `std::error::Error`. See [PR 2710].
+
+- Remove the concept of individual `Transport::Listener` streams from `Transport`.
+  Instead the `Transport` is polled directly via `Transport::poll`. The
+  `Transport` is now responsible for driving its listeners. See [PR 2652].
+
+[PR 2691]: https://github.com/libp2p/rust-libp2p/pull/2691
+[PR 2707]: https://github.com/libp2p/rust-libp2p/pull/2707
+[PR 2710]: https://github.com/libp2p/rust-libp2p/pull/2710
+[PR 2652]: https://github.com/libp2p/rust-libp2p/pull/2652
+
+# 0.33.0
+
+- Have methods on `Transport` take `&mut self` instead of `self`. See [PR 2529].
+- Remove `StreamMuxer::flush_all`. See [PR 2669].
+- Rename `StreamMuxer::close` to `StreamMuxer::poll_close`. See [PR 2666].
+- Remove deprecated function `StreamMuxer::is_remote_acknowledged`. See [PR 2665].
+
+[PR 2529]: https://github.com/libp2p/rust-libp2p/pull/2529
+[PR 2666]: https://github.com/libp2p/rust-libp2p/pull/2666
+[PR 2665]: https://github.com/libp2p/rust-libp2p/pull/2665
+[PR 2669]: https://github.com/libp2p/rust-libp2p/pull/2669
+
+
+# 0.32.1
+
+- Add `PeerId::try_from_multiaddr` to extract a `PeerId` from a `Multiaddr` that ends in `/p2p/<peer-id>`.
+
+# 0.32.0 [2022-02-22]
+
+- Remove `Network`. `libp2p-core` is from now on an auxiliary crate only. Users
+  that have previously used `Network` only, will need to use `Swarm` instead. See
+  [PR 2492].
+
+- Update to `multiaddr` `v0.14.0`.
+
+- Update to `multihash` `v0.16.0`.
+
+- Implement `Display` on `DialError`. See [PR 2456].
+
+- Update to `parking_lot` `v0.12.0`. See [PR 2463].
+
+- Validate PeerRecord signature matching peer ID. See [RUSTSEC-2022-0009].
+
+- Don't take ownership of key in `PeerRecord::new` and `SignedEnvelope::new`. See [PR 2516].
+
+- Remove `SignedEnvelope::payload` in favor of
+  `SignedEnvelope::payload_and_signing_key`. The caller is expected to check
+  that the returned signing key makes sense in the payload's context. See [PR 2522].
+
+[PR 2456]: https://github.com/libp2p/rust-libp2p/pull/2456
+[RUSTSEC-2022-0009]: https://rustsec.org/advisories/RUSTSEC-2022-0009.html
+[PR 2492]: https://github.com/libp2p/rust-libp2p/pull/2492
+[PR 2516]: https://github.com/libp2p/rust-libp2p/pull/2516
+[PR 2463]: https://github.com/libp2p/rust-libp2p/pull/2463/
+[PR 2522]: https://github.com/libp2p/rust-libp2p/pull/2522
+
+# 0.31.0 [2022-01-27]
+
+- Update dependencies.
+
+- Report concrete connection IDs in `NetworkEvent::ConnectionEstablished` and
+  `NetworkEvent::ConnectionClosed` (see [PR 2350]).
+
+- Migrate to Rust edition 2021 (see [PR 2339]).
+
+- Add support for ECDSA identities (see [PR 2352]).
+
+- Add `ConnectedPoint::is_relayed` (see [PR 2392]).
+
+- Enable overriding _dial concurrency factor_ per dial via
+  `DialOpts::override_dial_concurrency_factor`.
+
+  - Introduces `libp2p_core::DialOpts` mirroring `libp2p_swarm::DialOpts`.
+      Passed as an argument to `Network::dial`.
+  - Removes `Peer::dial` in favor of `Network::dial`.
+
+  See [PR 2404].
+
+- Implement `Serialize` and `Deserialize` for `PeerId` (see [PR 2408])
+
+- Report negotiated and expected `PeerId` as well as remote address in
+  `DialError::WrongPeerId` (see [PR 2428]).
+
+- Allow overriding role when dialing. This option is needed for NAT and firewall
+  hole punching.
+
+    - Add `Transport::dial_as_listener`. As `Transport::dial` but
+      overrides the role of the local node on the connection . I.e. has the
+      local node act as a listener on the outgoing connection.
+
+    - Add `override_role` option to `DialOpts`.
+
+  See [PR 2363].
+
+[PR 2339]: https://github.com/libp2p/rust-libp2p/pull/2339
+[PR 2350]: https://github.com/libp2p/rust-libp2p/pull/2350
+[PR 2352]: https://github.com/libp2p/rust-libp2p/pull/2352
+[PR 2392]: https://github.com/libp2p/rust-libp2p/pull/2392
+[PR 2404]: https://github.com/libp2p/rust-libp2p/pull/2404
+[PR 2408]: https://github.com/libp2p/rust-libp2p/pull/2408
+[PR 2428]: https://github.com/libp2p/rust-libp2p/pull/2428
+[PR 2363]: https://github.com/libp2p/rust-libp2p/pull/2363
+
+# 0.30.1 [2021-11-16]
+
+- Use `instant` instead of `wasm-timer` (see [PR 2245]).
+
+[PR 2245]: https://github.com/libp2p/rust-libp2p/pull/2245
+
+# 0.30.0 [2021-11-01]
 
 - Add `ConnectionLimit::with_max_established` (see [PR 2137]).
 
@@ -36,6 +237,17 @@
 - Add `SignedEnvelope` and `PeerRecord` according to [RFC0002] and [RFC0003]
   (see [PR 2107]).
 
+- Report `ListenersEvent::Closed` when dropping a listener in `ListenersStream::remove_listener`,
+  return `bool` instead of `Result<(), ()>` (see [PR 2261]).
+
+- Concurrently dial address candidates within a single dial attempt (see [PR 2248]) configured
+  via `Network::with_dial_concurrency_factor`.
+
+  - On success of a single address, provide errors of the thus far failed dials via
+    `NetworkEvent::ConnectionEstablished::outgoing`.
+
+  - On failure of all addresses, provide the errors via `NetworkEvent::DialError`.
+
 [PR 2145]: https://github.com/libp2p/rust-libp2p/pull/2145
 [PR 2213]: https://github.com/libp2p/rust-libp2p/pull/2213
 [PR 2142]: https://github.com/libp2p/rust-libp2p/pull/2142
@@ -44,6 +256,8 @@
 [PR 2191]: https://github.com/libp2p/rust-libp2p/pull/2191
 [PR 2195]: https://github.com/libp2p/rust-libp2p/pull/2195
 [PR 2107]: https://github.com/libp2p/rust-libp2p/pull/2107
+[PR 2248]: https://github.com/libp2p/rust-libp2p/pull/2248
+[PR 2261]: https://github.com/libp2p/rust-libp2p/pull/2261
 [RFC0002]: https://github.com/libp2p/specs/blob/master/RFC/0002-signed-envelopes.md
 [RFC0003]: https://github.com/libp2p/specs/blob/master/RFC/0003-routing-records.md
 
@@ -65,7 +279,7 @@
 
 # 0.28.3 [2021-04-26]
 
-- Fix build with secp256k1 disabled [PR 2057](https://github.com/libp2p/rust-libp2p/pull/2057].
+- Fix build with secp256k1 disabled [PR 2057](https://github.com/libp2p/rust-libp2p/pull/2057).
 
 # 0.28.2 [2021-04-13]
 

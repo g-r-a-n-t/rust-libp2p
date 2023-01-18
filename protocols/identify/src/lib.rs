@@ -18,32 +18,58 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-//! Implementation of the [Identify] protocol.
+//! Implementation of the [Identify](https://github.com/libp2p/specs/blob/master/identify/README.md) protocol.
 //!
 //! This implementation of the protocol periodically exchanges
-//! [`IdentifyInfo`] messages between the peers on an established connection.
+//! [`Info`] messages between the peers on an established connection.
 //!
 //! At least one identification request is sent on a newly established
 //! connection, beyond which the behaviour does not keep connections alive.
 //!
+//! # Important Discrepancies
+//!
+//! - **Using Identify with other protocols** Unlike some other libp2p implementations,
+//! rust-libp2p does not treat Identify as a core protocol. This means that other protocols cannot
+//! rely upon the existence of Identify, and need to be manually hooked up to Identify in order to
+//! make use of its capabilities.
+//!
 //! # Usage
 //!
-//! The [`Identify`] struct implements a `NetworkBehaviour` that negotiates
-//! and executes the protocol on every established connection, emitting
-//! [`IdentifyEvent`]s.
-//!
-//! [Identify]: https://github.com/libp2p/specs/tree/master/identify
-//! [`Identify`]: self::Identify
-//! [`IdentifyEvent`]: self::IdentifyEvent
-//! [`IdentifyInfo`]: self::IdentifyInfo
+//! The [`Behaviour`] struct implements a [`NetworkBehaviour`](libp2p_swarm::NetworkBehaviour)
+//! that negotiates and executes the protocol on every established connection, emitting
+//! [`Event`]s.
 
-pub use self::identify::{Identify, IdentifyConfig, IdentifyEvent};
-pub use self::protocol::IdentifyInfo;
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+pub use self::behaviour::{Behaviour, Config, Event};
+pub use self::protocol::{Info, UpgradeError, PROTOCOL_NAME, PUSH_PROTOCOL_NAME};
+
+#[deprecated(
+    since = "0.40.0",
+    note = "Use re-exports that omit `Identify` prefix, i.e. `libp2p_identify::Config`"
+)]
+pub type IdentifyConfig = Config;
+
+#[deprecated(
+    since = "0.40.0",
+    note = "Use re-exports that omit `Identify` prefix, i.e. `libp2p_identify::Event`"
+)]
+pub type IdentifyEvent = Event;
+
+#[deprecated(since = "0.40.0", note = "Use libp2p_identify::Behaviour instead.")]
+pub type Identify = Behaviour;
+
+#[deprecated(
+    since = "0.40.0",
+    note = "Use re-exports that omit `Identify` prefix, i.e. `libp2p_identify::Info`"
+)]
+pub type IdentifyInfo = Info;
+
+mod behaviour;
 mod handler;
-mod identify;
 mod protocol;
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 mod structs_proto {
     include!(concat!(env!("OUT_DIR"), "/structs.rs"));
 }

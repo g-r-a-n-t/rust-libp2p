@@ -98,7 +98,7 @@ impl Graph {
                 p2p_suffix_connected.unwrap()
             );
 
-            Swarm::dial_addr(&mut next.1, connected_addr_no_p2p).unwrap();
+            next.1.dial(connected_addr_no_p2p).unwrap();
 
             connected_nodes.push(next);
         }
@@ -170,16 +170,14 @@ fn build_node() -> (Multiaddr, Swarm<Gossipsub>) {
         .validation_mode(ValidationMode::Permissive)
         .build()
         .unwrap();
-    let behaviour = Gossipsub::new(MessageAuthenticity::Author(peer_id.clone()), config).unwrap();
-    let mut swarm = Swarm::new(transport, behaviour, peer_id);
+    let behaviour = Gossipsub::new(MessageAuthenticity::Author(peer_id), config).unwrap();
+    let mut swarm = Swarm::without_executor(transport, behaviour, peer_id);
 
     let port = 1 + random::<u64>();
     let mut addr: Multiaddr = Protocol::Memory(port).into();
     swarm.listen_on(addr.clone()).unwrap();
 
-    addr = addr.with(libp2p_core::multiaddr::Protocol::P2p(
-        public_key.to_peer_id().into(),
-    ));
+    addr = addr.with(Protocol::P2p(public_key.to_peer_id().into()));
 
     (addr, swarm)
 }
@@ -189,7 +187,7 @@ fn multi_hop_propagation() {
     let _ = env_logger::try_init();
 
     fn prop(num_nodes: u8, seed: u64) -> TestResult {
-        if num_nodes < 2 || num_nodes > 50 {
+        if !(2..=50).contains(&num_nodes) {
             return TestResult::discard();
         }
 
@@ -218,8 +216,7 @@ fn multi_hop_propagation() {
         });
         if !all_subscribed {
             return TestResult::error(format!(
-                "Timed out waiting for all nodes to subscribe but only have {:?}/{:?}.",
-                subscribed, num_nodes,
+                "Timed out waiting for all nodes to subscribe but only have {subscribed:?}/{num_nodes:?}.",
             ));
         }
 
@@ -248,8 +245,7 @@ fn multi_hop_propagation() {
         });
         if !all_received {
             return TestResult::error(format!(
-                "Timed out waiting for all nodes to receive the msg but only have {:?}/{:?}.",
-                received_msgs, num_nodes,
+                "Timed out waiting for all nodes to receive the msg but only have {received_msgs:?}/{num_nodes:?}.",
             ));
         }
 

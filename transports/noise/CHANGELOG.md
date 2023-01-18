@@ -1,4 +1,81 @@
-# 0.33.0 [unreleased]
+# 0.42.0 [unreleased]
+
+- Update to `libp2p-core` `v0.39.0`.
+
+- Deprecate non-compliant noise implementation. We intend to remove it in a future release without replacement. See [PR 3227].
+
+- Deprecate `LegacyConfig` without replacement. See [PR 3265].
+
+[PR 3227]: https://github.com/libp2p/rust-libp2p/pull/3227
+[PR 3265]: https://github.com/libp2p/rust-libp2p/pull/3265
+
+# 0.41.0
+
+- Remove `prost::Error` from public API. See [PR 3058].
+
+- Update to `libp2p-core` `v0.38.0`.
+
+- Update `rust-version` to reflect the actual MSRV: 1.60.0. See [PR 3090].
+
+- Introduce more variants to `NoiseError` to better differentiate between failure cases during authentication. See [PR 2972].
+
+[PR 3058]: https://github.com/libp2p/rust-libp2p/pull/3058
+[PR 3090]: https://github.com/libp2p/rust-libp2p/pull/3090
+[PR 2972]: https://github.com/libp2p/rust-libp2p/pull/2972
+
+# 0.40.0
+
+- Update to `libp2p-core` `v0.37.0`.
+
+- Introduce `NoiseAuthenticated::xx` constructor, assuming a X25519 DH key exchange. An XX key exchange and X25519 keys
+  are the most common way of using noise in libp2p and thus deserve a convenience constructor. See [PR 2887].
+- Add `NoiseConfig::with_prologue` which allows users to set the noise prologue of the handshake. See [PR 2903].
+- Remove `Deref` implementation on `AuthenticKeypair`. See [PR 2909].
+- Make `handshake` module private. See [PR 2909].
+- Deprecate `AuthenticKeypair::into_identity`. See [PR 2909].
+
+[PR 2887]: https://github.com/libp2p/rust-libp2p/pull/2887
+[PR 2903]: https://github.com/libp2p/rust-libp2p/pull/2903
+[PR 2909]: https://github.com/libp2p/rust-libp2p/pull/2909
+
+# 0.39.0
+
+- Update to `libp2p-core` `v0.36.0`.
+
+# 0.38.0
+
+- Update prost requirement from 0.10 to 0.11 which no longer installs the protoc Protobuf compiler.
+  Thus you will need protoc installed locally. See [PR 2788].
+
+- Update to `libp2p-core` `v0.35.0`.
+
+[PR 2788]: https://github.com/libp2p/rust-libp2p/pull/2788
+
+# 0.37.0
+
+- Update to `libp2p-core` `v0.34.0`.
+
+# 0.36.0
+
+- Update to `libp2p-core` `v0.33.0`.
+
+# 0.35.0 [2022-02-22]
+
+- Update to `libp2p-core` `v0.32.0`.
+
+- Update to `snow` `v0.9.0`. See [PR 2472].
+
+[PR 2472]: https://github.com/libp2p/rust-libp2p/pull/2472
+
+# 0.34.0 [2022-01-27]
+
+- Update dependencies.
+
+- Migrate to Rust edition 2021 (see [PR 2339]).
+
+[PR 2339]: https://github.com/libp2p/rust-libp2p/pull/2339
+
+# 0.33.0 [2021-11-01]
 
 - Make default features of `libp2p-core` optional.
   [PR 2181](https://github.com/libp2p/rust-libp2p/pull/2181)

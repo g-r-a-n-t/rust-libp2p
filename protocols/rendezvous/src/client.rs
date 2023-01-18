@@ -22,28 +22,29 @@ use crate::codec::{Cookie, ErrorCode, Namespace, NewRegistration, Registration, 
 use crate::handler;
 use crate::handler::outbound;
 use crate::handler::outbound::OpenInfo;
-use crate::substream_handler::SubstreamProtocolsHandler;
+use crate::substream_handler::SubstreamConnectionHandler;
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
-use libp2p_core::connection::ConnectionId;
+use instant::Duration;
 use libp2p_core::identity::error::SigningError;
 use libp2p_core::identity::Keypair;
 use libp2p_core::{Multiaddr, PeerId, PeerRecord};
+use libp2p_swarm::behaviour::FromSwarm;
 use libp2p_swarm::{
-    CloseConnection, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, PollParameters,
+    CloseConnection, ConnectionId, ExternalAddresses, NetworkBehaviour, NetworkBehaviourAction,
+    NotifyHandler, PollParameters,
 };
 use std::collections::{HashMap, VecDeque};
 use std::iter::FromIterator;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 pub struct Behaviour {
     events: VecDeque<
         NetworkBehaviourAction<
             Event,
-            SubstreamProtocolsHandler<void::Void, outbound::Stream, outbound::OpenInfo>,
+            SubstreamConnectionHandler<void::Void, outbound::Stream, outbound::OpenInfo>,
         >,
     >,
     keypair: Keypair,
@@ -56,6 +57,8 @@ pub struct Behaviour {
 
     /// Tracks the expiry of registrations that we have discovered and stored in `discovered_peers` otherwise we have a memory leak.
     expiring_registrations: FuturesUnordered<BoxFuture<'static, (PeerId, Namespace)>>,
+
+    external_addresses: ExternalAddresses,
 }
 
 impl Behaviour {
@@ -69,6 +72,7 @@ impl Behaviour {
             expiring_registrations: FuturesUnordered::from_iter(vec![
                 futures::future::pending().boxed()
             ]),
+            external_addresses: Default::default(),
         }
     }
 
@@ -164,26 +168,26 @@ pub enum Event {
 }
 
 impl NetworkBehaviour for Behaviour {
-    type ProtocolsHandler =
-        SubstreamProtocolsHandler<void::Void, outbound::Stream, outbound::OpenInfo>;
+    type ConnectionHandler =
+        SubstreamConnectionHandler<void::Void, outbound::Stream, outbound::OpenInfo>;
     type OutEvent = Event;
 
-    fn new_handler(&mut self) -> Self::ProtocolsHandler {
+    fn new_handler(&mut self) -> Self::ConnectionHandler {
         let initial_keep_alive = Duration::from_secs(30);
 
-        SubstreamProtocolsHandler::new_outbound_only(initial_keep_alive)
+        SubstreamConnectionHandler::new_outbound_only(initial_keep_alive)
     }
 
     fn addresses_of_peer(&mut self, peer: &PeerId) -> Vec<Multiaddr> {
         self.discovered_peers
             .iter()
-            .filter_map(|((candidate, _), addresses)| (candidate == peer).then(|| addresses))
+            .filter_map(|((candidate, _), addresses)| (candidate == peer).then_some(addresses))
             .flatten()
             .cloned()
             .collect()
     }
 
-    fn inject_event(
+    fn on_connection_handler_event(
         &mut self,
         peer_id: PeerId,
         connection_id: ConnectionId,
@@ -214,8 +218,8 @@ impl NetworkBehaviour for Behaviour {
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
-        poll_params: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
+        _: &mut impl PollParameters,
+    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>> {
         if let Some(event) = self.events.pop_front() {
             return Poll::Ready(event);
         }
@@ -223,10 +227,8 @@ impl NetworkBehaviour for Behaviour {
         if let Some((namespace, rendezvous_node, ttl)) = self.pending_register_requests.pop() {
             // Update our external addresses based on the Swarm's current knowledge.
             // It doesn't make sense to register addresses on which we are not reachable, hence this should not be configurable from the outside.
-            let external_addresses = poll_params
-                .external_addresses()
-                .map(|r| r.addr)
-                .collect::<Vec<Multiaddr>>();
+
+            let external_addresses = self.external_addresses.iter().cloned().collect::<Vec<_>>();
 
             if external_addresses.is_empty() {
                 return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
@@ -234,7 +236,7 @@ impl NetworkBehaviour for Behaviour {
                 ));
             }
 
-            let action = match PeerRecord::new(self.keypair.clone(), external_addresses) {
+            let action = match PeerRecord::new(&self.keypair, external_addresses) {
                 Ok(peer_record) => NetworkBehaviourAction::NotifyHandler {
                     peer_id: rendezvous_node,
                     event: handler::OutboundInEvent::NewSubstream {
@@ -265,6 +267,25 @@ impl NetworkBehaviour for Behaviour {
 
         Poll::Pending
     }
+
+    fn on_swarm_event(&mut self, event: FromSwarm<Self::ConnectionHandler>) {
+        self.external_addresses.on_swarm_event(&event);
+
+        match event {
+            FromSwarm::ConnectionEstablished(_)
+            | FromSwarm::ConnectionClosed(_)
+            | FromSwarm::AddressChange(_)
+            | FromSwarm::DialFailure(_)
+            | FromSwarm::ListenFailure(_)
+            | FromSwarm::NewListener(_)
+            | FromSwarm::NewListenAddr(_)
+            | FromSwarm::ExpiredListenAddr(_)
+            | FromSwarm::ListenerError(_)
+            | FromSwarm::ListenerClosed(_)
+            | FromSwarm::NewExternalAddr(_)
+            | FromSwarm::ExpiredExternalAddr(_) => {}
+        }
+    }
 }
 
 fn handle_outbound_event(
@@ -275,7 +296,7 @@ fn handle_outbound_event(
 ) -> Vec<
     NetworkBehaviourAction<
         Event,
-        SubstreamProtocolsHandler<void::Void, outbound::Stream, outbound::OpenInfo>,
+        SubstreamConnectionHandler<void::Void, outbound::Stream, outbound::OpenInfo>,
     >,
 > {
     match event {
@@ -310,8 +331,7 @@ fn handle_outbound_event(
             expiring_registrations.extend(registrations.iter().cloned().map(|registration| {
                 async move {
                     // if the timer errors we consider it expired
-                    let _ =
-                        wasm_timer::Delay::new(Duration::from_secs(registration.ttl as u64)).await;
+                    futures_timer::Delay::new(Duration::from_secs(registration.ttl)).await;
 
                     (registration.record.peer_id(), registration.namespace)
                 }

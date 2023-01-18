@@ -18,11 +18,25 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-//! Implementation of the libp2p-specific Kademlia protocol.
+//! Implementation of the libp2p-specific [Kademlia](https://github.com/libp2p/specs/blob/master/kad-dht/README.md) protocol.
+//!
+//! # Important Discrepancies
+//!
+//! - **Peer Discovery with Identify** In other libp2p implementations, the
+//! [Identify](https://github.com/libp2p/specs/tree/master/identify) protocol might be seen as a core protocol. Rust-libp2p
+//! tries to stay as generic as possible, and does not make this assumption.
+//! This means that the Identify protocol must be manually hooked up to Kademlia through calls
+//! to [`Kademlia::add_address`].
+//! If you choose not to use the Identify protocol, and do not provide an alternative peer
+//! discovery mechanism, a Kademlia node will not discover nodes beyond the network's
+//! [boot nodes](https://docs.libp2p.io/concepts/glossary/#boot-node). Without the Identify protocol,
+//! existing nodes in the kademlia network cannot obtain the listen addresses
+//! of nodes querying them, and thus will not be able to add them to their routing table.
 
 // TODO: we allow dead_code for now because this library contains a lot of unused code that will
 //       be useful later for record store
 #![allow(dead_code)]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 pub mod handler;
 pub mod kbucket;
@@ -34,6 +48,7 @@ mod behaviour;
 mod jobs;
 mod query;
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 mod dht_proto {
     include!(concat!(env!("OUT_DIR"), "/dht.pb.rs"));
 }
@@ -43,12 +58,13 @@ pub use behaviour::{
     AddProviderContext, AddProviderError, AddProviderOk, AddProviderPhase, AddProviderResult,
     BootstrapError, BootstrapOk, BootstrapResult, GetClosestPeersError, GetClosestPeersOk,
     GetClosestPeersResult, GetProvidersError, GetProvidersOk, GetProvidersResult, GetRecordError,
-    GetRecordOk, GetRecordResult, InboundRequest, PeerRecord, PutRecordContext, PutRecordError,
-    PutRecordOk, PutRecordPhase, PutRecordResult, QueryInfo, QueryMut, QueryRef, QueryResult,
-    QueryStats,
+    GetRecordOk, GetRecordResult, InboundRequest, NoKnownPeers, PeerRecord, PutRecordContext,
+    PutRecordError, PutRecordOk, PutRecordPhase, PutRecordResult, QueryInfo, QueryMut, QueryRef,
+    QueryResult, QueryStats,
 };
 pub use behaviour::{
-    Kademlia, KademliaCaching, KademliaConfig, KademliaEvent, KademliaStoreInserts, Quorum,
+    Kademlia, KademliaBucketInserts, KademliaCaching, KademliaConfig, KademliaEvent,
+    KademliaStoreInserts, ProgressStep, Quorum,
 };
 pub use protocol::KadConnectionType;
 pub use query::QueryId;

@@ -1,4 +1,102 @@
-# 0.31.0 [unreleased]
+# 0.42.0 [unreleased]
+
+- Update to `libp2p-core` `v0.39.0`.
+
+- Update to `libp2p-swarm` `v0.42.0`.
+
+# 0.41.0
+
+- Update to `libp2p-core` `v0.38.0`.
+
+- Update to `libp2p-swarm` `v0.41.0`.
+
+- Replace `Behaviour`'s `NetworkBehaviour` implemention `inject_*` methods with the new `on_*` methods.
+  See [PR 3011].
+
+- Replace `Handler`'s `ConnectionHandler` implemention `inject_*` methods with the new `on_*` methods.
+  See [PR 3085].
+
+- Update `rust-version` to reflect the actual MSRV: 1.62.0. See [PR 3090].
+
+[PR 3085]: https://github.com/libp2p/rust-libp2p/pull/3085
+[PR 3011]: https://github.com/libp2p/rust-libp2p/pull/3011
+[PR 3090]: https://github.com/libp2p/rust-libp2p/pull/3090
+
+# 0.40.0
+
+- Bump rand to 0.8 and quickcheck to 1. See [PR 2857].
+- Deprecate types with `Ping` prefix. Prefer importing them via the `ping` namespace, i.e. `libp2p::ping::Event` instead
+  of `libp2p::ping::PingEvent`. See [PR 2937].
+
+- Update to `libp2p-core` `v0.37.0`.
+
+- Update to `libp2p-swarm` `v0.40.0`.
+
+- Deprecate `Config::with_keep_alive`. See [PR 2859].
+
+[PR 2857]: https://github.com/libp2p/rust-libp2p/pull/2857
+[PR 2937]: https://github.com/libp2p/rust-libp2p/pull/2937
+[PR 2859]: https://github.com/libp2p/rust-libp2p/pull/2859/
+
+# 0.39.0
+
+- Update to `libp2p-swarm` `v0.39.0`.
+
+- Update to `libp2p-core` `v0.36.0`.
+
+# 0.38.0
+
+- Update to `libp2p-swarm` `v0.38.0`.
+
+- Expose `PROTOCOL_NAME`. See [PR 2734].
+
+- Update to `libp2p-core` `v0.35.0`.
+
+[PR 2734]: https://github.com/libp2p/rust-libp2p/pull/2734/
+
+# 0.37.0
+
+- Update to `libp2p-core` `v0.34.0`.
+
+- Update to `libp2p-swarm` `v0.37.0`.
+
+# 0.36.0
+
+- Update to `libp2p-core` `v0.33.0`.
+
+- Update to `libp2p-swarm` `v0.36.0`.
+
+# 0.35.0
+
+- Update to `libp2p-swarm` `v0.35.0`.
+
+# 0.34.0 [2022-02-22]
+
+- Update to `libp2p-core` `v0.32.0`.
+
+- Update to `libp2p-swarm` `v0.34.0`.
+
+- Merge NetworkBehaviour's inject_\* paired methods (see PR 2445).
+
+[PR 2445]: https://github.com/libp2p/rust-libp2p/pull/2445
+
+# 0.33.0 [2022-01-27]
+
+- Update dependencies.
+
+- Migrate to Rust edition 2021 (see [PR 2339]).
+
+[PR 2339]: https://github.com/libp2p/rust-libp2p/pull/2339
+
+# 0.32.0 [2021-11-16]
+
+- Use `instant` and `futures-timer` instead of `wasm-timer` (see [PR 2245]).
+
+- Update dependencies.
+
+[PR 2245]: https://github.com/libp2p/rust-libp2p/pull/2245
+
+# 0.31.0 [2021-11-01]
 
 - Make default features of `libp2p-core` optional.
   [PR 2181](https://github.com/libp2p/rust-libp2p/pull/2181)

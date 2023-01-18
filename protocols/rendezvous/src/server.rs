@@ -20,17 +20,18 @@
 
 use crate::codec::{Cookie, ErrorCode, Namespace, NewRegistration, Registration, Ttl};
 use crate::handler::inbound;
-use crate::substream_handler::{InboundSubstreamId, SubstreamProtocolsHandler};
+use crate::substream_handler::{InboundSubstreamId, SubstreamConnectionHandler};
 use crate::{handler, MAX_TTL, MIN_TTL};
 use bimap::BiMap;
 use futures::future::BoxFuture;
 use futures::ready;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
-use libp2p_core::connection::ConnectionId;
 use libp2p_core::PeerId;
+use libp2p_swarm::behaviour::FromSwarm;
 use libp2p_swarm::{
-    CloseConnection, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, PollParameters,
+    CloseConnection, ConnectionId, NetworkBehaviour, NetworkBehaviourAction, NotifyHandler,
+    PollParameters,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter::FromIterator;
@@ -40,7 +41,7 @@ use void::Void;
 
 pub struct Behaviour {
     events: VecDeque<
-        NetworkBehaviourAction<Event, SubstreamProtocolsHandler<inbound::Stream, Void, ()>>,
+        NetworkBehaviourAction<Event, SubstreamConnectionHandler<inbound::Stream, Void, ()>>,
     >,
     registrations: Registrations,
 }
@@ -109,16 +110,16 @@ pub enum Event {
 }
 
 impl NetworkBehaviour for Behaviour {
-    type ProtocolsHandler = SubstreamProtocolsHandler<inbound::Stream, Void, ()>;
+    type ConnectionHandler = SubstreamConnectionHandler<inbound::Stream, Void, ()>;
     type OutEvent = Event;
 
-    fn new_handler(&mut self) -> Self::ProtocolsHandler {
+    fn new_handler(&mut self) -> Self::ConnectionHandler {
         let initial_keep_alive = Duration::from_secs(30);
 
-        SubstreamProtocolsHandler::new_inbound_only(initial_keep_alive)
+        SubstreamConnectionHandler::new_inbound_only(initial_keep_alive)
     }
 
-    fn inject_event(
+    fn on_connection_handler_event(
         &mut self,
         peer_id: PeerId,
         connection: ConnectionId,
@@ -147,7 +148,7 @@ impl NetworkBehaviour for Behaviour {
         &mut self,
         cx: &mut Context<'_>,
         _: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ProtocolsHandler>> {
+    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>> {
         if let Poll::Ready(ExpiredRegistration(registration)) = self.registrations.poll(cx) {
             return Poll::Ready(NetworkBehaviourAction::GenerateEvent(
                 Event::RegistrationExpired(registration),
@@ -160,6 +161,23 @@ impl NetworkBehaviour for Behaviour {
 
         Poll::Pending
     }
+
+    fn on_swarm_event(&mut self, event: FromSwarm<Self::ConnectionHandler>) {
+        match event {
+            FromSwarm::ConnectionEstablished(_)
+            | FromSwarm::ConnectionClosed(_)
+            | FromSwarm::AddressChange(_)
+            | FromSwarm::DialFailure(_)
+            | FromSwarm::ListenFailure(_)
+            | FromSwarm::NewListener(_)
+            | FromSwarm::NewListenAddr(_)
+            | FromSwarm::ExpiredListenAddr(_)
+            | FromSwarm::ListenerError(_)
+            | FromSwarm::ListenerClosed(_)
+            | FromSwarm::NewExternalAddr(_)
+            | FromSwarm::ExpiredExternalAddr(_) => {}
+        }
+    }
 }
 
 fn handle_inbound_event(
@@ -168,7 +186,7 @@ fn handle_inbound_event(
     connection: ConnectionId,
     id: InboundSubstreamId,
     registrations: &mut Registrations,
-) -> Vec<NetworkBehaviourAction<Event, SubstreamProtocolsHandler<inbound::Stream, Void, ()>>> {
+) -> Vec<NetworkBehaviourAction<Event, SubstreamConnectionHandler<inbound::Stream, Void, ()>>> {
     match event {
         // bad registration
         inbound::OutEvent::RegistrationRequested(registration)
@@ -381,14 +399,8 @@ impl Registrations {
         self.registrations
             .insert(registration_id, registration.clone());
 
-        let next_expiry = wasm_timer::Delay::new(Duration::from_secs(ttl as u64))
-            .map(move |result| {
-                if result.is_err() {
-                    log::warn!("Timer for registration {} has unexpectedly errored, treating it as expired", registration_id.0);
-                }
-
-                registration_id
-            })
+        let next_expiry = futures_timer::Delay::new(Duration::from_secs(ttl))
+            .map(move |_| registration_id)
             .boxed();
 
         self.next_expiry.push(next_expiry);
@@ -496,8 +508,8 @@ pub struct CookieNamespaceMismatch;
 
 #[cfg(test)]
 mod tests {
+    use instant::SystemTime;
     use std::option::Option::None;
-    use std::time::SystemTime;
 
     use libp2p_core::{identity, PeerRecord};
 
@@ -736,7 +748,7 @@ mod tests {
     ) -> NewRegistration {
         NewRegistration::new(
             Namespace::from_static(namespace),
-            PeerRecord::new(identity, vec!["/ip4/127.0.0.1/tcp/1234".parse().unwrap()]).unwrap(),
+            PeerRecord::new(&identity, vec!["/ip4/127.0.0.1/tcp/1234".parse().unwrap()]).unwrap(),
             ttl,
         )
     }

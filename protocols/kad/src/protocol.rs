@@ -32,13 +32,13 @@ use asynchronous_codec::Framed;
 use bytes::BytesMut;
 use codec::UviBytes;
 use futures::prelude::*;
+use instant::Instant;
 use libp2p_core::upgrade::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 use libp2p_core::{Multiaddr, PeerId};
 use prost::Message;
 use std::{borrow::Cow, convert::TryFrom, time::Duration};
 use std::{io, iter};
 use unsigned_varint::codec;
-use wasm_timer::Instant;
 
 /// The protocol name used for negotiating with multistream-select.
 pub const DEFAULT_PROTO_NAME: &[u8] = b"/ipfs/kad/1.0.0";
@@ -105,10 +105,13 @@ impl TryFrom<proto::message::Peer> for KadPeer {
 
         let mut addrs = Vec::with_capacity(peer.addrs.len());
         for addr in peer.addrs.into_iter() {
-            let as_ma = Multiaddr::try_from(addr).map_err(invalid_data)?;
-            addrs.push(as_ma);
+            match Multiaddr::try_from(addr) {
+                Ok(a) => addrs.push(a),
+                Err(e) => {
+                    log::debug!("Unable to parse multiaddr: {e}");
+                }
+            };
         }
-        debug_assert_eq!(addrs.len(), addrs.capacity());
 
         let connection_ty = proto::message::ConnectionType::from_i32(peer.connection)
             .ok_or_else(|| invalid_data("unknown connection type"))?
@@ -142,21 +145,21 @@ impl From<KadPeer> for proto::message::Peer {
 //       `OutboundUpgrade` to be just a single message
 #[derive(Debug, Clone)]
 pub struct KademliaProtocolConfig {
-    protocol_name: Cow<'static, [u8]>,
+    protocol_names: Vec<Cow<'static, [u8]>>,
     /// Maximum allowed size of a packet.
     max_packet_size: usize,
 }
 
 impl KademliaProtocolConfig {
     /// Returns the configured protocol name.
-    pub fn protocol_name(&self) -> &[u8] {
-        &self.protocol_name
+    pub fn protocol_names(&self) -> &[Cow<'static, [u8]>] {
+        &self.protocol_names
     }
 
-    /// Modifies the protocol name used on the wire. Can be used to create incompatibilities
+    /// Modifies the protocol names used on the wire. Can be used to create incompatibilities
     /// between networks on purpose.
-    pub fn set_protocol_name(&mut self, name: impl Into<Cow<'static, [u8]>>) {
-        self.protocol_name = name.into();
+    pub fn set_protocol_names(&mut self, names: Vec<Cow<'static, [u8]>>) {
+        self.protocol_names = names;
     }
 
     /// Modifies the maximum allowed size of a single Kademlia packet.
@@ -168,7 +171,7 @@ impl KademliaProtocolConfig {
 impl Default for KademliaProtocolConfig {
     fn default() -> Self {
         KademliaProtocolConfig {
-            protocol_name: Cow::Borrowed(DEFAULT_PROTO_NAME),
+            protocol_names: iter::once(Cow::Borrowed(DEFAULT_PROTO_NAME)).collect(),
             max_packet_size: DEFAULT_MAX_PACKET_SIZE,
         }
     }
@@ -176,10 +179,10 @@ impl Default for KademliaProtocolConfig {
 
 impl UpgradeInfo for KademliaProtocolConfig {
     type Info = Cow<'static, [u8]>;
-    type InfoIter = iter::Once<Self::Info>;
+    type InfoIter = std::vec::IntoIter<Self::Info>;
 
     fn protocol_info(&self) -> Self::InfoIter {
-        iter::once(self.protocol_name.clone())
+        self.protocol_names.clone().into_iter()
     }
 }
 
@@ -378,6 +381,7 @@ fn req_msg_to_proto(kad_msg: KadRequestMsg) -> proto::Message {
         },
         KadRequestMsg::PutValue { record } => proto::Message {
             r#type: proto::message::MessageType::PutValue as i32,
+            key: record.key.to_vec(),
             record: Some(record_to_proto(record)),
             ..proto::Message::default()
         },
@@ -600,9 +604,32 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn skip_invalid_multiaddr() {
+        let valid_multiaddr: Multiaddr = "/ip6/2001:db8::/tcp/1234".parse().unwrap();
+        let valid_multiaddr_bytes = valid_multiaddr.to_vec();
+
+        let invalid_multiaddr = {
+            let a = vec![255; 8];
+            assert!(Multiaddr::try_from(a.clone()).is_err());
+            a
+        };
+
+        let payload = proto::message::Peer {
+            id: PeerId::random().to_bytes(),
+            addrs: vec![valid_multiaddr_bytes, invalid_multiaddr],
+            connection: proto::message::ConnectionType::CanConnect.into(),
+        };
+
+        let peer = KadPeer::try_from(payload).expect("not to fail");
+
+        assert_eq!(peer.multiaddrs, vec![valid_multiaddr])
+    }
 
     /*// TODO: restore
-    use self::libp2p_tcp::TcpConfig;
+    use self::libp2p_tcp::TcpTransport;
     use self::tokio::runtime::current_thread::Runtime;
     use futures::{Future, Sink, Stream};
     use libp2p_core::{PeerId, PublicKey, Transport};
@@ -657,10 +684,10 @@ mod tests {
             let (tx, rx) = mpsc::channel();
 
             let bg_thread = thread::spawn(move || {
-                let transport = TcpConfig::new().with_upgrade(KademliaProtocolConfig);
+                let transport = TcpTransport::default().with_upgrade(KademliaProtocolConfig);
 
                 let (listener, addr) = transport
-                    .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+                    .listen_on( "/ip4/127.0.0.1/tcp/0".parse().unwrap())
                     .unwrap();
                 tx.send(addr).unwrap();
 
@@ -677,7 +704,7 @@ mod tests {
                 let _ = rt.block_on(future).unwrap();
             });
 
-            let transport = TcpConfig::new().with_upgrade(KademliaProtocolConfig);
+            let transport = TcpTransport::default().with_upgrade(KademliaProtocolConfig);
 
             let future = transport
                 .dial(rx.recv().unwrap())

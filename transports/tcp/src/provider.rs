@@ -28,17 +28,11 @@ pub mod tokio;
 
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite};
-use ipnet::IpNet;
+use futures::Stream;
+use if_watch::{IfEvent, IpNet};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::task::{Context, Poll};
 use std::{fmt, io};
-
-/// An event relating to a change of availability of an address
-/// on a network interface.
-pub enum IfEvent {
-    Up(IpNet),
-    Down(IpNet),
-}
 
 /// An incoming connection returned from [`Provider::poll_accept()`].
 pub struct Incoming<S> {
@@ -54,12 +48,14 @@ pub trait Provider: Clone + Send + 'static {
     type Stream: AsyncRead + AsyncWrite + Send + Unpin + fmt::Debug;
     /// The type of TCP listeners obtained from [`Provider::new_listener`].
     type Listener: Send + Unpin;
-    /// The type of network interface observers obtained from [`Provider::if_watcher`].
-    type IfWatcher: Send + Unpin;
+    /// The type of IfWatcher obtained from [`Provider::new_if_watcher`].
+    type IfWatcher: Stream<Item = io::Result<IfEvent>> + Send + Unpin;
 
-    /// Creates an instance of [`Self::IfWatcher`] that can be polled for
-    /// network interface changes via [`Self::poll_interfaces`].
-    fn if_watcher() -> BoxFuture<'static, io::Result<Self::IfWatcher>>;
+    /// Create a new IfWatcher responsible for detecting IP address changes.
+    fn new_if_watcher() -> io::Result<Self::IfWatcher>;
+
+    /// An iterator over all currently discovered addresses.
+    fn addrs(_: &Self::IfWatcher) -> Vec<IpNet>;
 
     /// Creates a new listener wrapping the given [`TcpListener`] that
     /// can be polled for incoming connections via [`Self::poll_accept()`].
@@ -77,8 +73,4 @@ pub trait Provider: Clone + Send + 'static {
         _: &mut Self::Listener,
         _: &mut Context<'_>,
     ) -> Poll<io::Result<Incoming<Self::Stream>>>;
-
-    /// Polls a [`Self::IfWatcher`] for network interface changes, ensuring a task wakeup,
-    /// if necessary.
-    fn poll_interfaces(_: &mut Self::IfWatcher, _: &mut Context<'_>) -> Poll<io::Result<IfEvent>>;
 }

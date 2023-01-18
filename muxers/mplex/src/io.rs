@@ -810,10 +810,10 @@ where
 
     /// Checks whether a substream is open for reading.
     fn can_read(&self, id: &LocalStreamId) -> bool {
-        match self.substreams.get(id) {
-            Some(SubstreamState::Open { .. }) | Some(SubstreamState::SendClosed { .. }) => true,
-            _ => false,
-        }
+        matches!(
+            self.substreams.get(id),
+            Some(SubstreamState::Open { .. }) | Some(SubstreamState::SendClosed { .. })
+        )
     }
 
     /// Sends pending frames, without flushing.
@@ -1105,27 +1105,26 @@ mod tests {
     use asynchronous_codec::{Decoder, Encoder};
     use bytes::BytesMut;
     use quickcheck::*;
-    use rand::prelude::*;
     use std::collections::HashSet;
     use std::num::NonZeroU8;
     use std::ops::DerefMut;
     use std::pin::Pin;
 
     impl Arbitrary for MaxBufferBehaviour {
-        fn arbitrary<G: Gen>(g: &mut G) -> MaxBufferBehaviour {
-            *[MaxBufferBehaviour::Block, MaxBufferBehaviour::ResetStream]
-                .choose(g)
+        fn arbitrary(g: &mut Gen) -> MaxBufferBehaviour {
+            *g.choose(&[MaxBufferBehaviour::Block, MaxBufferBehaviour::ResetStream])
                 .unwrap()
         }
     }
 
     impl Arbitrary for MplexConfig {
-        fn arbitrary<G: Gen>(g: &mut G) -> MplexConfig {
+        fn arbitrary(g: &mut Gen) -> MplexConfig {
             MplexConfig {
-                max_substreams: g.gen_range(1, 100),
-                max_buffer_len: g.gen_range(1, 1000),
+                max_substreams: g.gen_range(1..100),
+                max_buffer_len: g.gen_range(1..1000),
                 max_buffer_behaviour: MaxBufferBehaviour::arbitrary(g),
-                split_send_size: g.gen_range(1, 10000),
+                split_send_size: g.gen_range(1..10000),
+                protocol_name: crate::config::DEFAULT_MPLEX_PROTOCOL_NAME,
             }
         }
     }
@@ -1221,7 +1220,7 @@ mod tests {
                 for i in 0..cfg.max_substreams {
                     match m.poll_next_stream(cx) {
                         Poll::Pending => panic!("Expected new inbound stream."),
-                        Poll::Ready(Err(e)) => panic!("{:?}", e),
+                        Poll::Ready(Err(e)) => panic!("{e:?}"),
                         Poll::Ready(Ok(id)) => {
                             assert_eq!(id, LocalStreamId::listener(i as u64));
                         }
@@ -1232,7 +1231,7 @@ mod tests {
                 // after reading and buffering data frames up to the limit.
                 let id = LocalStreamId::listener(0);
                 match m.poll_next_stream(cx) {
-                    Poll::Ready(r) => panic!("Unexpected result for next stream: {:?}", r),
+                    Poll::Ready(r) => panic!("Unexpected result for next stream: {r:?}"),
                     Poll::Pending => {
                         // We expect the implementation to yield when the buffer
                         // is full but before it is exceeded and the max buffer
@@ -1244,7 +1243,7 @@ mod tests {
                             cfg.max_buffer_len
                         );
                         match m.poll_next_stream(cx) {
-                            Poll::Ready(r) => panic!("Unexpected result for next stream: {:?}", r),
+                            Poll::Ready(r) => panic!("Unexpected result for next stream: {r:?}"),
                             Poll::Pending => {
                                 // Expect the buffer for stream 0 to be exceeded, triggering
                                 // the max. buffer behaviour.
@@ -1282,7 +1281,7 @@ mod tests {
                         Poll::Ready(Ok(Some(bytes))) => {
                             assert_eq!(bytes, data);
                         }
-                        x => panic!("Unexpected: {:?}", x),
+                        x => panic!("Unexpected: {x:?}"),
                     }
                 }
 
@@ -1294,7 +1293,7 @@ mod tests {
                         // Expect to read EOF
                         match m.poll_read_stream(cx, id) {
                             Poll::Ready(Ok(None)) => {}
-                            poll => panic!("Unexpected: {:?}", poll),
+                            poll => panic!("Unexpected: {poll:?}"),
                         }
                     }
                     MaxBufferBehaviour::Block => {
@@ -1302,7 +1301,7 @@ mod tests {
                         match m.poll_read_stream(cx, id) {
                             Poll::Ready(Ok(Some(bytes))) => assert_eq!(bytes, data),
                             Poll::Pending => assert_eq!(overflow.get(), 1),
-                            poll => panic!("Unexpected: {:?}", poll),
+                            poll => panic!("Unexpected: {poll:?}"),
                         }
                     }
                 }
@@ -1327,7 +1326,7 @@ mod tests {
                 w_buf: BytesMut::new(),
                 eof: false,
             };
-            let mut m = Multiplexed::new(conn, cfg.clone());
+            let mut m = Multiplexed::new(conn, cfg);
 
             // Run the test.
             let mut opened = HashSet::new();

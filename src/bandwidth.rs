@@ -18,15 +18,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{
-    core::{
-        transport::{ListenerEvent, TransportError},
-        Transport,
-    },
-    Multiaddr,
-};
+use crate::core::muxing::{StreamMuxer, StreamMuxerEvent};
 
-use atomic::Atomic;
 use futures::{
     io::{IoSlice, IoSliceMut},
     prelude::*,
@@ -36,129 +29,93 @@ use std::{
     convert::TryFrom as _,
     io,
     pin::Pin,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
 };
 
-/// Wraps around a `Transport` and counts the number of bytes that go through all the opened
-/// connections.
+/// Wraps around a [`StreamMuxer`] and counts the number of bytes that go through all the opened
+/// streams.
 #[derive(Clone)]
-pub struct BandwidthLogging<TInner> {
-    inner: TInner,
-    sinks: Arc<BandwidthSinks>,
-}
-
-impl<TInner> BandwidthLogging<TInner> {
-    /// Creates a new [`BandwidthLogging`] around the transport.
-    pub fn new(inner: TInner) -> (Self, Arc<BandwidthSinks>) {
-        let sink = Arc::new(BandwidthSinks {
-            inbound: Atomic::new(0),
-            outbound: Atomic::new(0),
-        });
-
-        let trans = BandwidthLogging {
-            inner,
-            sinks: sink.clone(),
-        };
-
-        (trans, sink)
-    }
-}
-
-impl<TInner> Transport for BandwidthLogging<TInner>
-where
-    TInner: Transport,
-{
-    type Output = BandwidthConnecLogging<TInner::Output>;
-    type Error = TInner::Error;
-    type Listener = BandwidthListener<TInner::Listener>;
-    type ListenerUpgrade = BandwidthFuture<TInner::ListenerUpgrade>;
-    type Dial = BandwidthFuture<TInner::Dial>;
-
-    fn listen_on(self, addr: Multiaddr) -> Result<Self::Listener, TransportError<Self::Error>> {
-        let sinks = self.sinks;
-        self.inner
-            .listen_on(addr)
-            .map(move |inner| BandwidthListener { inner, sinks })
-    }
-
-    fn dial(self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let sinks = self.sinks;
-        self.inner
-            .dial(addr)
-            .map(move |fut| BandwidthFuture { inner: fut, sinks })
-    }
-
-    fn address_translation(&self, server: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
-        self.inner.address_translation(server, observed)
-    }
-}
-
-/// Wraps around a `Stream` that produces connections. Wraps each connection around a bandwidth
-/// counter.
 #[pin_project::pin_project]
-pub struct BandwidthListener<TInner> {
+pub(crate) struct BandwidthLogging<SMInner> {
     #[pin]
-    inner: TInner,
+    inner: SMInner,
     sinks: Arc<BandwidthSinks>,
 }
 
-impl<TInner, TConn, TErr> Stream for BandwidthListener<TInner>
-where
-    TInner: TryStream<Ok = ListenerEvent<TConn, TErr>, Error = TErr>,
-{
-    type Item = Result<ListenerEvent<BandwidthFuture<TConn>, TErr>, TErr>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-
-        let event = if let Some(event) = ready!(this.inner.try_poll_next(cx)?) {
-            event
-        } else {
-            return Poll::Ready(None);
-        };
-
-        let event = event.map({
-            let sinks = this.sinks.clone();
-            |inner| BandwidthFuture { inner, sinks }
-        });
-
-        Poll::Ready(Some(Ok(event)))
+impl<SMInner> BandwidthLogging<SMInner> {
+    /// Creates a new [`BandwidthLogging`] around the stream muxer.
+    pub(crate) fn new(inner: SMInner, sinks: Arc<BandwidthSinks>) -> Self {
+        Self { inner, sinks }
     }
 }
 
-/// Wraps around a `Future` that produces a connection. Wraps the connection around a bandwidth
-/// counter.
-#[pin_project::pin_project]
-pub struct BandwidthFuture<TInner> {
-    #[pin]
-    inner: TInner,
-    sinks: Arc<BandwidthSinks>,
-}
+impl<SMInner> StreamMuxer for BandwidthLogging<SMInner>
+where
+    SMInner: StreamMuxer,
+{
+    type Substream = InstrumentedStream<SMInner::Substream>;
+    type Error = SMInner::Error;
 
-impl<TInner: TryFuture> Future for BandwidthFuture<TInner> {
-    type Output = Result<BandwidthConnecLogging<TInner::Ok>, TInner::Error>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<StreamMuxerEvent, Self::Error>> {
         let this = self.project();
-        let inner = ready!(this.inner.try_poll(cx)?);
-        let logged = BandwidthConnecLogging {
+        this.inner.poll(cx)
+    }
+
+    fn poll_inbound(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::Substream, Self::Error>> {
+        let this = self.project();
+        let inner = ready!(this.inner.poll_inbound(cx)?);
+        let logged = InstrumentedStream {
             inner,
             sinks: this.sinks.clone(),
         };
         Poll::Ready(Ok(logged))
     }
+
+    fn poll_outbound(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::Substream, Self::Error>> {
+        let this = self.project();
+        let inner = ready!(this.inner.poll_outbound(cx)?);
+        let logged = InstrumentedStream {
+            inner,
+            sinks: this.sinks.clone(),
+        };
+        Poll::Ready(Ok(logged))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.project();
+        this.inner.poll_close(cx)
+    }
 }
 
-/// Allows obtaining the average bandwidth of the connections created from a [`BandwidthLogging`].
+/// Allows obtaining the average bandwidth of the streams.
 pub struct BandwidthSinks {
-    inbound: Atomic<u64>,
-    outbound: Atomic<u64>,
+    inbound: AtomicU64,
+    outbound: AtomicU64,
 }
 
 impl BandwidthSinks {
-    /// Returns the total number of bytes that have been downloaded on all the connections spawned
-    /// through the [`BandwidthLogging`].
+    /// Returns a new [`BandwidthSinks`].
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inbound: AtomicU64::new(0),
+            outbound: AtomicU64::new(0),
+        })
+    }
+
+    /// Returns the total number of bytes that have been downloaded on all the streams.
     ///
     /// > **Note**: This method is by design subject to race conditions. The returned value should
     /// >           only ever be used for statistics purposes.
@@ -166,8 +123,7 @@ impl BandwidthSinks {
         self.inbound.load(Ordering::Relaxed)
     }
 
-    /// Returns the total number of bytes that have been uploaded on all the connections spawned
-    /// through the [`BandwidthLogging`].
+    /// Returns the total number of bytes that have been uploaded on all the streams.
     ///
     /// > **Note**: This method is by design subject to race conditions. The returned value should
     /// >           only ever be used for statistics purposes.
@@ -176,15 +132,15 @@ impl BandwidthSinks {
     }
 }
 
-/// Wraps around an `AsyncRead + AsyncWrite` and logs the bandwidth that goes through it.
+/// Wraps around an [`AsyncRead`] + [`AsyncWrite`] and logs the bandwidth that goes through it.
 #[pin_project::pin_project]
-pub struct BandwidthConnecLogging<TInner> {
+pub(crate) struct InstrumentedStream<SMInner> {
     #[pin]
-    inner: TInner,
+    inner: SMInner,
     sinks: Arc<BandwidthSinks>,
 }
 
-impl<TInner: AsyncRead> AsyncRead for BandwidthConnecLogging<TInner> {
+impl<SMInner: AsyncRead> AsyncRead for InstrumentedStream<SMInner> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -214,7 +170,7 @@ impl<TInner: AsyncRead> AsyncRead for BandwidthConnecLogging<TInner> {
     }
 }
 
-impl<TInner: AsyncWrite> AsyncWrite for BandwidthConnecLogging<TInner> {
+impl<SMInner: AsyncWrite> AsyncWrite for InstrumentedStream<SMInner> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

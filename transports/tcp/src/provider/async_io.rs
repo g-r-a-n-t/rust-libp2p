@@ -18,24 +18,51 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use super::{IfEvent, Incoming, Provider};
+use super::{Incoming, Provider};
 
-use async_io_crate::Async;
+use async_io::Async;
 use futures::future::{BoxFuture, FutureExt};
 use std::io;
 use std::net;
 use std::task::{Context, Poll};
 
+/// A TCP [`Transport`](libp2p_core::Transport) that works with the `async-std` ecosystem.
+///
+/// # Example
+///
+/// ```rust
+/// # use libp2p_tcp as tcp;
+/// # use libp2p_core::Transport;
+/// # use futures::future;
+/// # use std::pin::Pin;
+/// #
+/// # #[async_std::main]
+/// # async fn main() {
+/// let mut transport = tcp::async_io::Transport::new(tcp::Config::default());
+/// let id = transport.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+///
+/// let addr = future::poll_fn(|cx| Pin::new(&mut transport).poll(cx)).await.into_new_address().unwrap();
+///
+/// println!("Listening on {addr}");
+/// # }
+/// ```
+pub type Transport = crate::Transport<Tcp>;
+
 #[derive(Copy, Clone)]
+#[doc(hidden)]
 pub enum Tcp {}
 
 impl Provider for Tcp {
     type Stream = Async<net::TcpStream>;
     type Listener = Async<net::TcpListener>;
-    type IfWatcher = if_watch::IfWatcher;
+    type IfWatcher = if_watch::smol::IfWatcher;
 
-    fn if_watcher() -> BoxFuture<'static, io::Result<Self::IfWatcher>> {
-        if_watch::IfWatcher::new().boxed()
+    fn new_if_watcher() -> io::Result<Self::IfWatcher> {
+        Self::IfWatcher::new()
+    }
+
+    fn addrs(if_watcher: &Self::IfWatcher) -> Vec<if_watch::IpNet> {
+        if_watcher.iter().copied().collect()
     }
 
     fn new_listener(l: net::TcpListener) -> io::Result<Self::Listener> {
@@ -44,9 +71,18 @@ impl Provider for Tcp {
 
     fn new_stream(s: net::TcpStream) -> BoxFuture<'static, io::Result<Self::Stream>> {
         async move {
+            // Taken from [`Async::connect`].
+
             let stream = Async::new(s)?;
+
+            // The stream becomes writable when connected.
             stream.writable().await?;
-            Ok(stream)
+
+            // Check if there was an error while connecting.
+            match stream.get_ref().take_error()? {
+                None => Ok(stream),
+                Some(err) => Err(err),
+            }
         }
         .boxed()
     }
@@ -77,12 +113,5 @@ impl Provider for Tcp {
             local_addr,
             remote_addr,
         }))
-    }
-
-    fn poll_interfaces(w: &mut Self::IfWatcher, cx: &mut Context<'_>) -> Poll<io::Result<IfEvent>> {
-        w.poll_unpin(cx).map_ok(|e| match e {
-            if_watch::IfEvent::Up(a) => IfEvent::Up(a),
-            if_watch::IfEvent::Down(a) => IfEvent::Down(a),
-        })
     }
 }

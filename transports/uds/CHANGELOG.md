@@ -1,9 +1,50 @@
-# 0.30.0 [unreleased]
+# 0.37.0
+
+- Update `rust-version` to reflect the actual MSRV: 1.60.0. See [PR 3090].
+
+[PR 3090]: https://github.com/libp2p/rust-libp2p/pull/3090
+
+# 0.36.0
+
+- Remove default features. If you previously depended on `async-std` you need to enable this explicitly now. See [PR 2918].
+
+- Update to `libp2p-core` `v0.37.0`.
+
+[PR 2918]: https://github.com/libp2p/rust-libp2p/pull/2918
+
+# 0.35.0
+
+- Update to `libp2p-core` `v0.36.0`.
+
+# 0.34.0
+
+- Update to `libp2p-core` `v0.35.0`.
+
+# 0.33.0
+
+- Update dependencies.
+- Update to `libp2p-core` `v0.34.0`.
+- Add `Transport::poll` and `Transport::remove_listener` and remove `Transport::Listener` for
+  `UdsConfig` Drive listener streams in `UdsConfig` directly. See [PR 2652].
+
+[PR 2652]: https://github.com/libp2p/rust-libp2p/pull/2652
+
+# 0.32.0 [2022-01-27]
+
+- Update to `libp2p-core` `v0.32.0`.
+
+# 0.31.0 [2022-01-27]
+
+- Update dependencies.
+
+- Migrate to Rust edition 2021 (see [PR 2339]).
+
+[PR 2339]: https://github.com/libp2p/rust-libp2p/pull/2339
+
+# 0.30.0 [2021-11-01]
 
 - Make default features of `libp2p-core` optional.
   [PR 2181](https://github.com/libp2p/rust-libp2p/pull/2181)
-
-- Update dependencies.
 
 # 0.29.0 [2021-07-12]
 

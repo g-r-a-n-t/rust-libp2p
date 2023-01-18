@@ -21,7 +21,9 @@
 //! Ed25519 keys.
 
 use super::error::DecodingError;
+use core::cmp;
 use core::fmt;
+use core::hash;
 use ed25519_dalek::{self as ed25519, Signer as _, Verifier as _};
 use rand::RngCore;
 use std::convert::TryFrom;
@@ -53,7 +55,7 @@ impl Keypair {
                 kp.zeroize();
                 Keypair(k)
             })
-            .map_err(|e| DecodingError::new("Ed25519 keypair").source(e))
+            .map_err(|e| DecodingError::failed_to_parse("Ed25519 keypair", e))
     }
 
     /// Sign a message using the private key of this keypair.
@@ -113,16 +115,40 @@ impl From<SecretKey> for Keypair {
 }
 
 /// An Ed25519 public key.
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Eq, Clone)]
 pub struct PublicKey(ed25519::PublicKey);
 
 impl fmt::Debug for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PublicKey(compressed): ")?;
         for byte in self.0.as_bytes() {
-            write!(f, "{:x}", byte)?;
+            write!(f, "{byte:x}")?;
         }
         Ok(())
+    }
+}
+
+impl cmp::PartialEq for PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_bytes().eq(other.0.as_bytes())
+    }
+}
+
+impl hash::Hash for PublicKey {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.0.as_bytes().hash(state);
+    }
+}
+
+impl cmp::PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        self.0.as_bytes().partial_cmp(other.0.as_bytes())
+    }
+}
+
+impl cmp::Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.0.as_bytes().cmp(other.0.as_bytes())
     }
 }
 
@@ -143,7 +169,7 @@ impl PublicKey {
     /// Decode a public key from a byte array as produced by `encode`.
     pub fn decode(k: &[u8]) -> Result<PublicKey, DecodingError> {
         ed25519::PublicKey::from_bytes(k)
-            .map_err(|e| DecodingError::new("Ed25519 public key").source(e))
+            .map_err(|e| DecodingError::failed_to_parse("Ed25519 public key", e))
             .map(PublicKey)
     }
 }
@@ -189,7 +215,7 @@ impl SecretKey {
     pub fn from_bytes(mut sk_bytes: impl AsMut<[u8]>) -> Result<SecretKey, DecodingError> {
         let sk_bytes = sk_bytes.as_mut();
         let secret = ed25519::SecretKey::from_bytes(&*sk_bytes)
-            .map_err(|e| DecodingError::new("Ed25519 secret key").source(e))?;
+            .map_err(|e| DecodingError::failed_to_parse("Ed25519 secret key", e))?;
         sk_bytes.zeroize();
         Ok(SecretKey(secret))
     }

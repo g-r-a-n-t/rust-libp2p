@@ -18,54 +18,79 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use super::{IfEvent, Incoming, Provider};
+use super::{Incoming, Provider};
 
 use futures::{
-    future::{self, BoxFuture, FutureExt},
+    future::{BoxFuture, FutureExt},
     prelude::*,
 };
-use futures_timer::Delay;
-use if_addrs::{get_if_addrs, IfAddr};
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::io;
 use std::net;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
+
+/// A TCP [`Transport`](libp2p_core::Transport) that works with the `tokio` ecosystem.
+///
+/// # Example
+///
+/// ```rust
+/// # use libp2p_tcp as tcp;
+/// # use libp2p_core::Transport;
+/// # use futures::future;
+/// # use std::pin::Pin;
+/// #
+/// # #[tokio::main]
+/// # async fn main() {
+/// let mut transport = tcp::tokio::Transport::new(tcp::Config::default());
+/// let id = transport.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+///
+/// let addr = future::poll_fn(|cx| Pin::new(&mut transport).poll(cx)).await.into_new_address().unwrap();
+///
+/// println!("Listening on {addr}");
+/// # }
+/// ```
+pub type Transport = crate::Transport<Tcp>;
 
 #[derive(Copy, Clone)]
+#[doc(hidden)]
 pub enum Tcp {}
-
-pub struct IfWatcher {
-    addrs: HashSet<IpNet>,
-    delay: Delay,
-    pending: Vec<IfEvent>,
-}
 
 impl Provider for Tcp {
     type Stream = TcpStream;
-    type Listener = tokio_crate::net::TcpListener;
-    type IfWatcher = IfWatcher;
+    type Listener = tokio::net::TcpListener;
+    type IfWatcher = if_watch::tokio::IfWatcher;
 
-    fn if_watcher() -> BoxFuture<'static, io::Result<Self::IfWatcher>> {
-        future::ready(Ok(IfWatcher {
-            addrs: HashSet::new(),
-            delay: Delay::new(Duration::from_secs(0)),
-            pending: Vec::new(),
-        }))
-        .boxed()
+    fn new_if_watcher() -> io::Result<Self::IfWatcher> {
+        Self::IfWatcher::new()
+    }
+
+    fn addrs(if_watcher: &Self::IfWatcher) -> Vec<if_watch::IpNet> {
+        if_watcher.iter().copied().collect()
     }
 
     fn new_listener(l: net::TcpListener) -> io::Result<Self::Listener> {
-        tokio_crate::net::TcpListener::try_from(l)
+        tokio::net::TcpListener::try_from(l)
     }
 
     fn new_stream(s: net::TcpStream) -> BoxFuture<'static, io::Result<Self::Stream>> {
         async move {
-            let stream = tokio_crate::net::TcpStream::try_from(s)?;
+            // Taken from [`tokio::net::TcpStream::connect_mio`].
+
+            let stream = tokio::net::TcpStream::try_from(s)?;
+
+            // Once we've connected, wait for the stream to be writable as
+            // that's when the actual connection has been initiated. Once we're
+            // writable we check for `take_socket_error` to see if the connect
+            // actually hit an error or not.
+            //
+            // If all that succeeded then we ship everything on up.
             stream.writable().await?;
+
+            if let Some(e) = stream.take_error()? {
+                return Err(e);
+            }
+
             Ok(TcpStream(stream))
         }
         .boxed()
@@ -90,60 +115,15 @@ impl Provider for Tcp {
             remote_addr,
         }))
     }
-
-    fn poll_interfaces(w: &mut Self::IfWatcher, cx: &mut Context<'_>) -> Poll<io::Result<IfEvent>> {
-        loop {
-            if let Some(event) = w.pending.pop() {
-                return Poll::Ready(Ok(event));
-            }
-
-            match Pin::new(&mut w.delay).poll(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(()) => {
-                    let ifs = get_if_addrs()?;
-                    let addrs = ifs
-                        .into_iter()
-                        .map(|iface| match iface.addr {
-                            IfAddr::V4(ip4) => {
-                                let prefix_len =
-                                    (!u32::from_be_bytes(ip4.netmask.octets())).leading_zeros();
-                                let ipnet = Ipv4Net::new(ip4.ip, prefix_len as u8)
-                                    .expect("prefix_len can not exceed 32");
-                                IpNet::V4(ipnet)
-                            }
-                            IfAddr::V6(ip6) => {
-                                let prefix_len =
-                                    (!u128::from_be_bytes(ip6.netmask.octets())).leading_zeros();
-                                let ipnet = Ipv6Net::new(ip6.ip, prefix_len as u8)
-                                    .expect("prefix_len can not exceed 128");
-                                IpNet::V6(ipnet)
-                            }
-                        })
-                        .collect::<HashSet<_>>();
-
-                    for down in w.addrs.difference(&addrs) {
-                        w.pending.push(IfEvent::Down(*down));
-                    }
-
-                    for up in addrs.difference(&w.addrs) {
-                        w.pending.push(IfEvent::Up(*up));
-                    }
-
-                    w.addrs = addrs;
-                    w.delay.reset(Duration::from_secs(10));
-                }
-            }
-        }
-    }
 }
 
-/// A [`tokio_crate::net::TcpStream`] that implements [`AsyncRead`] and [`AsyncWrite`].
+/// A [`tokio::net::TcpStream`] that implements [`AsyncRead`] and [`AsyncWrite`].
 #[derive(Debug)]
-pub struct TcpStream(pub tokio_crate::net::TcpStream);
+pub struct TcpStream(pub tokio::net::TcpStream);
 
-impl Into<tokio_crate::net::TcpStream> for TcpStream {
-    fn into(self: TcpStream) -> tokio_crate::net::TcpStream {
-        self.0
+impl From<TcpStream> for tokio::net::TcpStream {
+    fn from(t: TcpStream) -> tokio::net::TcpStream {
+        t.0
     }
 }
 
@@ -153,8 +133,8 @@ impl AsyncRead for TcpStream {
         cx: &mut Context,
         buf: &mut [u8],
     ) -> Poll<Result<usize, io::Error>> {
-        let mut read_buf = tokio_crate::io::ReadBuf::new(buf);
-        futures::ready!(tokio_crate::io::AsyncRead::poll_read(
+        let mut read_buf = tokio::io::ReadBuf::new(buf);
+        futures::ready!(tokio::io::AsyncRead::poll_read(
             Pin::new(&mut self.0),
             cx,
             &mut read_buf
@@ -169,15 +149,15 @@ impl AsyncWrite for TcpStream {
         cx: &mut Context,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        tokio_crate::io::AsyncWrite::poll_write(Pin::new(&mut self.0), cx, buf)
+        tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.0), cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
-        tokio_crate::io::AsyncWrite::poll_flush(Pin::new(&mut self.0), cx)
+        tokio::io::AsyncWrite::poll_flush(Pin::new(&mut self.0), cx)
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
-        tokio_crate::io::AsyncWrite::poll_shutdown(Pin::new(&mut self.0), cx)
+        tokio::io::AsyncWrite::poll_shutdown(Pin::new(&mut self.0), cx)
     }
 
     fn poll_write_vectored(
@@ -185,6 +165,6 @@ impl AsyncWrite for TcpStream {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        tokio_crate::io::AsyncWrite::poll_write_vectored(Pin::new(&mut self.0), cx, bufs)
+        tokio::io::AsyncWrite::poll_write_vectored(Pin::new(&mut self.0), cx, bufs)
     }
 }

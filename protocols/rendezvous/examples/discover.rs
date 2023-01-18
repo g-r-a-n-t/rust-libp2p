@@ -19,14 +19,12 @@
 // DEALINGS IN THE SOFTWARE.
 
 use futures::StreamExt;
-use libp2p::core::identity;
-use libp2p::core::PeerId;
-use libp2p::multiaddr::Protocol;
-use libp2p::ping::{Ping, PingConfig, PingEvent, PingSuccess};
-use libp2p::swarm::SwarmEvent;
-use libp2p::Swarm;
-use libp2p::{development_transport, rendezvous, Multiaddr};
+use libp2p_core::{identity, multiaddr::Protocol, upgrade::Version, Multiaddr, PeerId, Transport};
+use libp2p_ping as ping;
+use libp2p_rendezvous as rendezvous;
+use libp2p_swarm::{keep_alive, Swarm, SwarmEvent};
 use std::time::Duration;
+use void::Void;
 
 const NAMESPACE: &str = "rendezvous";
 
@@ -40,22 +38,23 @@ async fn main() {
         .parse()
         .unwrap();
 
-    let mut swarm = Swarm::new(
-        development_transport(identity.clone()).await.unwrap(),
+    let mut swarm = Swarm::with_tokio_executor(
+        libp2p_tcp::tokio::Transport::default()
+            .upgrade(Version::V1)
+            .authenticate(libp2p_noise::NoiseAuthenticated::xx(&identity).unwrap())
+            .multiplex(libp2p_yamux::YamuxConfig::default())
+            .boxed(),
         MyBehaviour {
             rendezvous: rendezvous::client::Behaviour::new(identity.clone()),
-            ping: Ping::new(
-                PingConfig::new()
-                    .with_interval(Duration::from_secs(1))
-                    .with_keep_alive(true),
-            ),
+            ping: ping::Behaviour::new(ping::Config::new().with_interval(Duration::from_secs(1))),
+            keep_alive: keep_alive::Behaviour,
         },
         PeerId::from(identity.public()),
     );
 
     log::info!("Local peer id: {}", swarm.local_peer_id());
 
-    let _ = swarm.dial_addr(rendezvous_point_address.clone());
+    swarm.dial(rendezvous_point_address.clone()).unwrap();
 
     let mut discover_tick = tokio::time::interval(Duration::from_secs(30));
     let mut cookie = None;
@@ -75,17 +74,6 @@ async fn main() {
                             None,
                             rendezvous_point,
                         );
-                    }
-                    SwarmEvent::UnreachableAddr { error, address, .. }
-                    | SwarmEvent::UnknownPeerUnreachableAddr { error, address, .. }
-                        if address == rendezvous_point_address =>
-                    {
-                        log::error!(
-                            "Failed to connect to rendezvous point at {}: {}",
-                            address,
-                            error
-                        );
-                        return;
                     }
                     SwarmEvent::Behaviour(MyEvent::Rendezvous(rendezvous::client::Event::Discovered {
                         registrations,
@@ -107,13 +95,13 @@ async fn main() {
                                         address.clone()
                                     };
 
-                                swarm.dial_addr(address_with_p2p).unwrap()
+                                swarm.dial(address_with_p2p).unwrap()
                             }
                         }
                     }
-                    SwarmEvent::Behaviour(MyEvent::Ping(PingEvent {
+                    SwarmEvent::Behaviour(MyEvent::Ping(ping::Event {
                         peer,
-                        result: Ok(PingSuccess::Ping { rtt }),
+                        result: Ok(ping::Success::Ping { rtt }),
                     })) if peer != rendezvous_point => {
                         log::info!("Ping to {} is {}ms", peer, rtt.as_millis())
                     }
@@ -135,7 +123,7 @@ async fn main() {
 #[derive(Debug)]
 enum MyEvent {
     Rendezvous(rendezvous::client::Event),
-    Ping(PingEvent),
+    Ping(ping::Event),
 }
 
 impl From<rendezvous::client::Event> for MyEvent {
@@ -144,16 +132,26 @@ impl From<rendezvous::client::Event> for MyEvent {
     }
 }
 
-impl From<PingEvent> for MyEvent {
-    fn from(event: PingEvent) -> Self {
+impl From<ping::Event> for MyEvent {
+    fn from(event: ping::Event) -> Self {
         MyEvent::Ping(event)
     }
 }
 
-#[derive(libp2p::NetworkBehaviour)]
-#[behaviour(event_process = false)]
-#[behaviour(out_event = "MyEvent")]
+impl From<Void> for MyEvent {
+    fn from(event: Void) -> Self {
+        void::unreachable(event)
+    }
+}
+
+#[derive(libp2p_swarm::NetworkBehaviour)]
+#[behaviour(
+    out_event = "MyEvent",
+    event_process = false,
+    prelude = "libp2p_swarm::derive_prelude"
+)]
 struct MyBehaviour {
     rendezvous: rendezvous::client::Behaviour,
-    ping: Ping,
+    ping: ping::Behaviour,
+    keep_alive: keep_alive::Behaviour,
 }

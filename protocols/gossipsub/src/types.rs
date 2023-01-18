@@ -21,9 +21,15 @@
 //! A collection of types using the Gossipsub system.
 use crate::rpc_proto;
 use crate::TopicHash;
-use libp2p_core::{connection::ConnectionId, PeerId};
+use libp2p_core::PeerId;
+use libp2p_swarm::ConnectionId;
+use prometheus_client::encoding::EncodeLabelValue;
+use prost::Message;
 use std::fmt;
 use std::fmt::Debug;
+
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 /// Validation kinds from the application for received messages.
@@ -40,6 +46,7 @@ pub enum MessageAcceptance {
 /// Macro for declaring message id types
 macro_rules! declare_message_id_type {
     ($name: ident, $name_string: expr) => {
+        #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
         #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name(pub Vec<u8>);
 
@@ -80,7 +87,7 @@ declare_message_id_type!(MessageId, "MessageId");
 // filter duplicates quickly without performing the overhead of decompression.
 declare_message_id_type!(FastMessageId, "FastMessageId");
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerConnections {
     /// The kind of protocol the peer supports.
     pub kind: PeerKind,
@@ -89,7 +96,7 @@ pub struct PeerConnections {
 }
 
 /// Describes the types of peers that can exist in the gossipsub context.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, EncodeLabelValue, Eq)]
 pub enum PeerKind {
     /// A gossipsub 1.1 peer.
     Gossipsubv1_1,
@@ -124,6 +131,21 @@ pub struct RawGossipsubMessage {
 
     /// Flag indicating if this message has been validated by the application or not.
     pub validated: bool,
+}
+
+impl RawGossipsubMessage {
+    /// Calculates the encoded length of this message (used for calculating metrics).
+    pub fn raw_protobuf_len(&self) -> usize {
+        let message = rpc_proto::Message {
+            from: self.source.map(|m| m.to_bytes()),
+            data: Some(self.data.clone()),
+            seqno: self.sequence_number.map(|s| s.to_be_bytes().to_vec()),
+            topic: TopicHash::into_string(self.topic.clone()),
+            signature: self.signature.clone(),
+            key: self.key.clone(),
+        };
+        message.encoded_len()
+    }
 }
 
 /// The message sent to the user after a [`RawGossipsubMessage`] has been transformed by a

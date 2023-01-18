@@ -23,11 +23,13 @@
 //! **Note**: This set of protocols is not interoperable with other
 //! libp2p implementations.
 
+#![allow(deprecated)]
+
 use crate::{NoiseConfig, NoiseError, Protocol, ProtocolParams};
 use curve25519_dalek::edwards::CompressedEdwardsY;
-use lazy_static::lazy_static;
 use libp2p_core::UpgradeInfo;
 use libp2p_core::{identity, identity::ed25519};
+use once_cell::sync::Lazy;
 use rand::Rng;
 use sha2::{Digest, Sha512};
 use x25519_dalek::{x25519, X25519_BASEPOINT_BYTES};
@@ -35,23 +37,31 @@ use zeroize::Zeroize;
 
 use super::*;
 
-lazy_static! {
-    static ref PARAMS_IK: ProtocolParams = "Noise_IK_25519_ChaChaPoly_SHA256"
+static PARAMS_IK: Lazy<ProtocolParams> = Lazy::new(|| {
+    "Noise_IK_25519_ChaChaPoly_SHA256"
         .parse()
         .map(ProtocolParams)
-        .expect("Invalid protocol name");
-    static ref PARAMS_IX: ProtocolParams = "Noise_IX_25519_ChaChaPoly_SHA256"
+        .expect("Invalid protocol name")
+});
+static PARAMS_IX: Lazy<ProtocolParams> = Lazy::new(|| {
+    "Noise_IX_25519_ChaChaPoly_SHA256"
         .parse()
         .map(ProtocolParams)
-        .expect("Invalid protocol name");
-    static ref PARAMS_XX: ProtocolParams = "Noise_XX_25519_ChaChaPoly_SHA256"
+        .expect("Invalid protocol name")
+});
+static PARAMS_XX: Lazy<ProtocolParams> = Lazy::new(|| {
+    "Noise_XX_25519_ChaChaPoly_SHA256"
         .parse()
         .map(ProtocolParams)
-        .expect("Invalid protocol name");
-}
+        .expect("Invalid protocol name")
+});
 
 /// A X25519 key.
 #[derive(Clone)]
+#[deprecated(
+    since = "0.42.0",
+    note = "Will be removed because it is not compliant with the official libp2p specification. Use `X25519Spec` instead."
+)]
 pub struct X25519([u8; 32]);
 
 impl AsRef<[u8]> for X25519 {
@@ -113,13 +123,14 @@ impl Protocol<X25519> for X25519 {
 
     fn public_from_bytes(bytes: &[u8]) -> Result<PublicKey<X25519>, NoiseError> {
         if bytes.len() != 32 {
-            return Err(NoiseError::InvalidKey);
+            return Err(NoiseError::InvalidLength);
         }
         let mut pk = [0u8; 32];
         pk.copy_from_slice(bytes);
         Ok(PublicKey(X25519(pk)))
     }
 
+    #[allow(irrefutable_let_patterns)]
     fn linked(id_pk: &identity::PublicKey, dh_pk: &PublicKey<X25519>) -> bool {
         if let identity::PublicKey::Ed25519(ref p) = id_pk {
             PublicKey::from_ed25519(p).as_ref() == dh_pk.as_ref()
@@ -130,15 +141,6 @@ impl Protocol<X25519> for X25519 {
 }
 
 impl Keypair<X25519> {
-    /// An "empty" keypair as a starting state for DH computations in `snow`,
-    /// which get manipulated through the `snow::types::Dh` interface.
-    pub(super) fn default() -> Self {
-        Keypair {
-            secret: SecretKey(X25519([0u8; 32])),
-            public: PublicKey(X25519([0u8; 32])),
-        }
-    }
-
     /// Create a new X25519 keypair.
     pub fn new() -> Keypair<X25519> {
         let mut sk_bytes = [0u8; 32];
@@ -162,6 +164,7 @@ impl Keypair<X25519> {
     /// > See also:
     /// >
     /// >  * [Noise: Static Key Reuse](http://www.noiseprotocol.org/noise.html#security-considerations)
+    #[allow(unreachable_patterns)]
     pub fn from_identity(id_keys: &identity::Keypair) -> Option<AuthenticKeypair<X25519>> {
         match id_keys {
             identity::Keypair::Ed25519(p) => {
@@ -177,6 +180,12 @@ impl Keypair<X25519> {
             }
             _ => None,
         }
+    }
+}
+
+impl Default for Keypair<X25519> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -219,7 +228,7 @@ impl SecretKey<X25519> {
         // let ed25519_sk = ed25519::SecretKey::from(ed);
         let mut curve25519_sk: [u8; 32] = [0; 32];
         let hash = Sha512::digest(ed25519_sk.as_ref());
-        curve25519_sk.copy_from_slice(&hash.as_ref()[..32]);
+        curve25519_sk.copy_from_slice(&hash[..32]);
         let sk = SecretKey(X25519(curve25519_sk)); // Copy
         curve25519_sk.zeroize();
         sk
@@ -260,7 +269,7 @@ impl snow::types::Dh for Keypair<X25519> {
         secret.zeroize();
     }
 
-    fn dh(&self, pk: &[u8], shared_secret: &mut [u8]) -> Result<(), ()> {
+    fn dh(&self, pk: &[u8], shared_secret: &mut [u8]) -> Result<(), snow::Error> {
         let mut p = [0; 32];
         p.copy_from_slice(&pk[..32]);
         let ss = x25519((self.secret.0).0, p);
@@ -272,10 +281,13 @@ impl snow::types::Dh for Keypair<X25519> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Use the ed25519_compact for testing
+    use ed25519_compact;
     use libp2p_core::identity::ed25519;
+    // Use the libsodium-sys-stable crypto_sign imports for testing
+    use libsodium_sys::crypto_sign_ed25519_pk_to_curve25519;
+    use libsodium_sys::crypto_sign_ed25519_sk_to_curve25519;
     use quickcheck::*;
-    use sodiumoxide::crypto::sign;
-    use std::os::raw::c_int;
     use x25519_dalek::StaticSecret;
 
     // ed25519 to x25519 keypair conversion must yield the same results as
@@ -286,9 +298,11 @@ mod tests {
             let ed25519 = ed25519::Keypair::generate();
             let x25519 = Keypair::from(SecretKey::from_ed25519(&ed25519.secret()));
 
-            let sodium_sec = ed25519_sk_to_curve25519(&sign::SecretKey(ed25519.encode()));
-            let sodium_pub =
-                ed25519_pk_to_curve25519(&sign::PublicKey(ed25519.public().encode().clone()));
+            let sodium_sec =
+                ed25519_sk_to_curve25519(&ed25519_compact::SecretKey::new(ed25519.encode()));
+            let sodium_pub = ed25519_pk_to_curve25519(&ed25519_compact::PublicKey::new(
+                ed25519.public().encode(),
+            ));
 
             let our_pub = x25519.public.0;
             // libsodium does the [clamping] of the scalar upon key construction,
@@ -321,18 +335,10 @@ mod tests {
         quickcheck(prop as fn() -> _);
     }
 
-    // Bindings to libsodium's ed25519 to curve25519 key conversions, to check that
-    // they agree with the conversions performed in this module.
-
-    extern "C" {
-        pub fn crypto_sign_ed25519_pk_to_curve25519(c: *mut u8, e: *const u8) -> c_int;
-        pub fn crypto_sign_ed25519_sk_to_curve25519(c: *mut u8, e: *const u8) -> c_int;
-    }
-
-    pub fn ed25519_pk_to_curve25519(k: &sign::PublicKey) -> Option<[u8; 32]> {
+    pub fn ed25519_pk_to_curve25519(k: &ed25519_compact::PublicKey) -> Option<[u8; 32]> {
         let mut out = [0u8; 32];
         unsafe {
-            if crypto_sign_ed25519_pk_to_curve25519(out.as_mut_ptr(), (&k.0).as_ptr()) == 0 {
+            if crypto_sign_ed25519_pk_to_curve25519(out.as_mut_ptr(), k.as_ptr()) == 0 {
                 Some(out)
             } else {
                 None
@@ -340,10 +346,10 @@ mod tests {
         }
     }
 
-    pub fn ed25519_sk_to_curve25519(k: &sign::SecretKey) -> Option<[u8; 32]> {
+    pub fn ed25519_sk_to_curve25519(k: &ed25519_compact::SecretKey) -> Option<[u8; 32]> {
         let mut out = [0u8; 32];
         unsafe {
-            if crypto_sign_ed25519_sk_to_curve25519(out.as_mut_ptr(), (&k.0).as_ptr()) == 0 {
+            if crypto_sign_ed25519_sk_to_curve25519(out.as_mut_ptr(), k.as_ptr()) == 0 {
                 Some(out)
             } else {
                 None

@@ -35,7 +35,7 @@
 //! terminal window, run:
 //!
 //! ```sh
-//! cargo run --example chat
+//! cargo run --example chat --features=full
 //! ```
 //!
 //! It will print the PeerId and the listening addresses, e.g. `Listening on
@@ -44,24 +44,23 @@
 //! In the second terminal window, start a new instance of the example with:
 //!
 //! ```sh
-//! cargo run --example chat -- /ip4/127.0.0.1/tcp/24915
+//! cargo run --example chat --features=full -- /ip4/127.0.0.1/tcp/24915
 //! ```
 //!
 //! The two nodes then connect.
 
-use async_std::{io, task};
-use futures::{future, prelude::*};
+use async_std::io;
+use futures::{
+    prelude::{stream::StreamExt, *},
+    select,
+};
 use libp2p::{
     floodsub::{self, Floodsub, FloodsubEvent},
-    identity,
-    mdns::{Mdns, MdnsConfig, MdnsEvent},
-    swarm::SwarmEvent,
-    Multiaddr, NetworkBehaviour, PeerId, Swarm,
+    identity, mdns,
+    swarm::{NetworkBehaviour, SwarmEvent},
+    Multiaddr, PeerId, Swarm,
 };
-use std::{
-    error::Error,
-    task::{Context, Poll},
-};
+use std::error::Error;
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -70,38 +69,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Create a random PeerId
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
-    println!("Local peer id: {:?}", local_peer_id);
+    println!("Local peer id: {local_peer_id:?}");
 
-    // Set up a an encrypted DNS-enabled TCP Transport over the Mplex and Yamux protocols
+    // Set up an encrypted DNS-enabled TCP Transport over the Mplex and Yamux protocols
     let transport = libp2p::development_transport(local_key).await?;
 
     // Create a Floodsub topic
     let floodsub_topic = floodsub::Topic::new("chat");
 
     // We create a custom network behaviour that combines floodsub and mDNS.
-    // In the future, we want to improve libp2p to make this easier to do.
-    // Use the derive to generate delegating NetworkBehaviour impl and require the
-    // NetworkBehaviourEventProcess implementations below.
+    // Use the derive to generate delegating NetworkBehaviour impl.
     #[derive(NetworkBehaviour)]
     #[behaviour(out_event = "OutEvent")]
     struct MyBehaviour {
         floodsub: Floodsub,
-        mdns: Mdns,
-
-        // Struct fields which do not implement NetworkBehaviour need to be ignored
-        #[behaviour(ignore)]
-        #[allow(dead_code)]
-        ignored_member: bool,
+        mdns: mdns::async_io::Behaviour,
     }
 
+    #[allow(clippy::large_enum_variant)]
     #[derive(Debug)]
     enum OutEvent {
         Floodsub(FloodsubEvent),
-        Mdns(MdnsEvent),
+        Mdns(mdns::Event),
     }
 
-    impl From<MdnsEvent> for OutEvent {
-        fn from(v: MdnsEvent) -> Self {
+    impl From<mdns::Event> for OutEvent {
+        fn from(v: mdns::Event) -> Self {
             Self::Mdns(v)
         }
     }
@@ -114,59 +107,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Create a Swarm to manage peers and events
     let mut swarm = {
-        let mdns = task::block_on(Mdns::new(MdnsConfig::default()))?;
+        let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
         let mut behaviour = MyBehaviour {
             floodsub: Floodsub::new(local_peer_id),
             mdns,
-            ignored_member: false,
         };
 
         behaviour.floodsub.subscribe(floodsub_topic.clone());
-        Swarm::new(transport, behaviour, local_peer_id)
+        Swarm::with_threadpool_executor(transport, behaviour, local_peer_id)
     };
 
     // Reach out to another node if specified
     if let Some(to_dial) = std::env::args().nth(1) {
         let addr: Multiaddr = to_dial.parse()?;
-        swarm.dial_addr(addr)?;
-        println!("Dialed {:?}", to_dial)
+        swarm.dial(addr)?;
+        println!("Dialed {to_dial:?}")
     }
 
     // Read full lines from stdin
-    let mut stdin = io::BufReader::new(io::stdin()).lines();
+    let mut stdin = io::BufReader::new(io::stdin()).lines().fuse();
 
     // Listen on all interfaces and whatever port the OS assigns
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
     // Kick it off
-    task::block_on(future::poll_fn(move |cx: &mut Context<'_>| {
-        loop {
-            match stdin.try_poll_next_unpin(cx)? {
-                Poll::Ready(Some(line)) => swarm
-                    .behaviour_mut()
-                    .floodsub
-                    .publish(floodsub_topic.clone(), line.as_bytes()),
-                Poll::Ready(None) => panic!("Stdin closed"),
-                Poll::Pending => break,
-            }
-        }
-        loop {
-            match swarm.poll_next_unpin(cx) {
-                Poll::Ready(Some(SwarmEvent::NewListenAddr { address, .. })) => {
-                    println!("Listening on {:?}", address);
+    loop {
+        select! {
+            line = stdin.select_next_some() => swarm
+                .behaviour_mut()
+                .floodsub
+                .publish(floodsub_topic.clone(), line.expect("Stdin not to close").as_bytes()),
+            event = swarm.select_next_some() => match event {
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    println!("Listening on {address:?}");
                 }
-                Poll::Ready(Some(SwarmEvent::Behaviour(OutEvent::Floodsub(
-                    FloodsubEvent::Message(message),
-                )))) => {
+                SwarmEvent::Behaviour(OutEvent::Floodsub(
+                    FloodsubEvent::Message(message)
+                )) => {
                     println!(
                         "Received: '{:?}' from {:?}",
                         String::from_utf8_lossy(&message.data),
                         message.source
                     );
                 }
-                Poll::Ready(Some(SwarmEvent::Behaviour(OutEvent::Mdns(
-                    MdnsEvent::Discovered(list),
-                )))) => {
+                SwarmEvent::Behaviour(OutEvent::Mdns(
+                    mdns::Event::Discovered(list)
+                )) => {
                     for (peer, _) in list {
                         swarm
                             .behaviour_mut()
@@ -174,9 +160,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             .add_node_to_partial_view(peer);
                     }
                 }
-                Poll::Ready(Some(SwarmEvent::Behaviour(OutEvent::Mdns(MdnsEvent::Expired(
-                    list,
-                ))))) => {
+                SwarmEvent::Behaviour(OutEvent::Mdns(mdns::Event::Expired(
+                    list
+                ))) => {
                     for (peer, _) in list {
                         if !swarm.behaviour_mut().mdns.has_node(&peer) {
                             swarm
@@ -185,12 +171,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 .remove_node_from_partial_view(&peer);
                         }
                     }
-                }
-                Poll::Ready(Some(_)) => {}
-                Poll::Ready(None) => return Poll::Ready(Ok(())),
-                Poll::Pending => break,
+                },
+                _ => {}
             }
         }
-        Poll::Pending
-    }))
+    }
 }

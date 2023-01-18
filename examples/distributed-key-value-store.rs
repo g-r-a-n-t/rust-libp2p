@@ -40,23 +40,20 @@
 //!
 //! 4. Close with Ctrl-c.
 
-use async_std::{io, task};
-use futures::prelude::*;
+use async_std::io;
+use futures::{prelude::*, select};
 use libp2p::kad::record::store::MemoryStore;
 use libp2p::kad::{
     record::Key, AddProviderOk, Kademlia, KademliaEvent, PeerRecord, PutRecordOk, QueryResult,
     Quorum, Record,
 };
 use libp2p::{
-    development_transport, identity,
-    mdns::{Mdns, MdnsConfig, MdnsEvent},
-    swarm::{NetworkBehaviourEventProcess, SwarmEvent},
-    NetworkBehaviour, PeerId, Swarm,
+    development_transport, identity, mdns,
+    swarm::{NetworkBehaviour, SwarmEvent},
+    PeerId, Swarm,
 };
-use std::{
-    error::Error,
-    task::{Context, Poll},
-};
+use libp2p_kad::{GetProvidersOk, GetRecordOk};
+use std::error::Error;
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -71,78 +68,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // We create a custom network behaviour that combines Kademlia and mDNS.
     #[derive(NetworkBehaviour)]
-    #[behaviour(event_process = true)]
+    #[behaviour(out_event = "MyBehaviourEvent")]
     struct MyBehaviour {
         kademlia: Kademlia<MemoryStore>,
-        mdns: Mdns,
+        mdns: mdns::async_io::Behaviour,
     }
 
-    impl NetworkBehaviourEventProcess<MdnsEvent> for MyBehaviour {
-        // Called when `mdns` produces an event.
-        fn inject_event(&mut self, event: MdnsEvent) {
-            if let MdnsEvent::Discovered(list) = event {
-                for (peer_id, multiaddr) in list {
-                    self.kademlia.add_address(&peer_id, multiaddr);
-                }
-            }
+    #[allow(clippy::large_enum_variant)]
+    enum MyBehaviourEvent {
+        Kademlia(KademliaEvent),
+        Mdns(mdns::Event),
+    }
+
+    impl From<KademliaEvent> for MyBehaviourEvent {
+        fn from(event: KademliaEvent) -> Self {
+            MyBehaviourEvent::Kademlia(event)
         }
     }
 
-    impl NetworkBehaviourEventProcess<KademliaEvent> for MyBehaviour {
-        // Called when `kademlia` produces an event.
-        fn inject_event(&mut self, message: KademliaEvent) {
-            match message {
-                KademliaEvent::OutboundQueryCompleted { result, .. } => match result {
-                    QueryResult::GetProviders(Ok(ok)) => {
-                        for peer in ok.providers {
-                            println!(
-                                "Peer {:?} provides key {:?}",
-                                peer,
-                                std::str::from_utf8(ok.key.as_ref()).unwrap()
-                            );
-                        }
-                    }
-                    QueryResult::GetProviders(Err(err)) => {
-                        eprintln!("Failed to get providers: {:?}", err);
-                    }
-                    QueryResult::GetRecord(Ok(ok)) => {
-                        for PeerRecord {
-                            record: Record { key, value, .. },
-                            ..
-                        } in ok.records
-                        {
-                            println!(
-                                "Got record {:?} {:?}",
-                                std::str::from_utf8(key.as_ref()).unwrap(),
-                                std::str::from_utf8(&value).unwrap(),
-                            );
-                        }
-                    }
-                    QueryResult::GetRecord(Err(err)) => {
-                        eprintln!("Failed to get record: {:?}", err);
-                    }
-                    QueryResult::PutRecord(Ok(PutRecordOk { key })) => {
-                        println!(
-                            "Successfully put record {:?}",
-                            std::str::from_utf8(key.as_ref()).unwrap()
-                        );
-                    }
-                    QueryResult::PutRecord(Err(err)) => {
-                        eprintln!("Failed to put record: {:?}", err);
-                    }
-                    QueryResult::StartProviding(Ok(AddProviderOk { key })) => {
-                        println!(
-                            "Successfully put provider record {:?}",
-                            std::str::from_utf8(key.as_ref()).unwrap()
-                        );
-                    }
-                    QueryResult::StartProviding(Err(err)) => {
-                        eprintln!("Failed to put provider record: {:?}", err);
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
+    impl From<mdns::Event> for MyBehaviourEvent {
+        fn from(event: mdns::Event) -> Self {
+            MyBehaviourEvent::Mdns(event)
         }
     }
 
@@ -151,41 +97,84 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // Create a Kademlia behaviour.
         let store = MemoryStore::new(local_peer_id);
         let kademlia = Kademlia::new(local_peer_id, store);
-        let mdns = task::block_on(Mdns::new(MdnsConfig::default()))?;
+        let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
         let behaviour = MyBehaviour { kademlia, mdns };
-        Swarm::new(transport, behaviour, local_peer_id)
+        Swarm::with_async_std_executor(transport, behaviour, local_peer_id)
     };
 
     // Read full lines from stdin
-    let mut stdin = io::BufReader::new(io::stdin()).lines();
+    let mut stdin = io::BufReader::new(io::stdin()).lines().fuse();
 
     // Listen on all interfaces and whatever port the OS assigns.
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
     // Kick it off.
-    task::block_on(future::poll_fn(move |cx: &mut Context<'_>| {
-        loop {
-            match stdin.try_poll_next_unpin(cx)? {
-                Poll::Ready(Some(line)) => {
-                    handle_input_line(&mut swarm.behaviour_mut().kademlia, line)
+    loop {
+        select! {
+        line = stdin.select_next_some() => handle_input_line(&mut swarm.behaviour_mut().kademlia, line.expect("Stdin not to close")),
+        event = swarm.select_next_some() => match event {
+            SwarmEvent::NewListenAddr { address, .. } => {
+                println!("Listening in {address:?}");
+            },
+            SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                for (peer_id, multiaddr) in list {
+                    swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
                 }
-                Poll::Ready(None) => panic!("Stdin closed"),
-                Poll::Pending => break,
             }
-        }
-        loop {
-            match swarm.poll_next_unpin(cx) {
-                Poll::Ready(Some(event)) => {
-                    if let SwarmEvent::NewListenAddr { address, .. } = event {
-                        println!("Listening on {:?}", address);
+            SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(KademliaEvent::OutboundQueryProgressed { result, ..})) => {
+                match result {
+                    QueryResult::GetProviders(Ok(GetProvidersOk::FoundProviders { key, providers, .. })) => {
+                        for peer in providers {
+                            println!(
+                                "Peer {peer:?} provides key {:?}",
+                                std::str::from_utf8(key.as_ref()).unwrap()
+                            );
+                        }
                     }
+                    QueryResult::GetProviders(Err(err)) => {
+                        eprintln!("Failed to get providers: {err:?}");
+                    }
+                    QueryResult::GetRecord(Ok(
+                        GetRecordOk::FoundRecord(PeerRecord {
+                            record: Record { key, value, .. },
+                            ..
+                        })
+                    )) => {
+                        println!(
+                            "Got record {:?} {:?}",
+                            std::str::from_utf8(key.as_ref()).unwrap(),
+                            std::str::from_utf8(&value).unwrap(),
+                        );
+                    }
+                    QueryResult::GetRecord(Ok(_)) => {}
+                    QueryResult::GetRecord(Err(err)) => {
+                        eprintln!("Failed to get record: {err:?}");
+                    }
+                    QueryResult::PutRecord(Ok(PutRecordOk { key })) => {
+                        println!(
+                            "Successfully put record {:?}",
+                            std::str::from_utf8(key.as_ref()).unwrap()
+                        );
+                    }
+                    QueryResult::PutRecord(Err(err)) => {
+                        eprintln!("Failed to put record: {err:?}");
+                    }
+                    QueryResult::StartProviding(Ok(AddProviderOk { key })) => {
+                        println!(
+                            "Successfully put provider record {:?}",
+                            std::str::from_utf8(key.as_ref()).unwrap()
+                        );
+                    }
+                    QueryResult::StartProviding(Err(err)) => {
+                        eprintln!("Failed to put provider record: {err:?}");
+                    }
+                    _ => {}
                 }
-                Poll::Ready(None) => return Poll::Ready(Ok(())),
-                Poll::Pending => break,
             }
+            _ => {}
         }
-        Poll::Pending
-    }))
+        }
+    }
 }
 
 fn handle_input_line(kademlia: &mut Kademlia<MemoryStore>, line: String) {
@@ -202,7 +191,7 @@ fn handle_input_line(kademlia: &mut Kademlia<MemoryStore>, line: String) {
                     }
                 }
             };
-            kademlia.get_record(&key, Quorum::One);
+            kademlia.get_record(key);
         }
         Some("GET_PROVIDERS") => {
             let key = {

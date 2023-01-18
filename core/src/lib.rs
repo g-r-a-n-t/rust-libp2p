@@ -35,6 +35,9 @@
 //!   define how to upgrade each individual substream to use a protocol.
 //!   See the `upgrade` module.
 
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+
+#[allow(clippy::derive_partial_eq_without_eq)]
 mod keys_proto {
     include!(concat!(env!("OUT_DIR"), "/keys_proto.rs"));
 }
@@ -43,6 +46,7 @@ mod envelope_proto {
     include!(concat!(env!("OUT_DIR"), "/envelope_proto.rs"));
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 mod peer_record_proto {
     include!(concat!(env!("OUT_DIR"), "/peer_record_proto.rs"));
 }
@@ -58,18 +62,17 @@ pub mod connection;
 pub mod either;
 pub mod identity;
 pub mod muxing;
-pub mod network;
 pub mod peer_record;
 pub mod signed_envelope;
 pub mod transport;
 pub mod upgrade;
 
-pub use connection::{Connected, ConnectedPoint, Endpoint};
+pub use connection::{ConnectedPoint, Endpoint};
 pub use identity::PublicKey;
 pub use multiaddr::Multiaddr;
 pub use multihash;
 pub use muxing::StreamMuxer;
-pub use network::Network;
+pub use peer_id::ParseError;
 pub use peer_id::PeerId;
 pub use peer_record::PeerRecord;
 pub use signed_envelope::SignedEnvelope;
@@ -77,22 +80,6 @@ pub use translation::address_translation;
 pub use transport::Transport;
 pub use upgrade::{InboundUpgrade, OutboundUpgrade, ProtocolName, UpgradeError, UpgradeInfo};
 
-use std::{future::Future, pin::Pin};
-
-/// Implemented on objects that can run a `Future` in the background.
-///
-/// > **Note**: While it may be tempting to implement this trait on types such as
-/// >           [`futures::stream::FuturesUnordered`], please note that passing an `Executor` is
-/// >           optional, and that `FuturesUnordered` (or a similar struct) will automatically
-/// >           be used as fallback by libp2p. The `Executor` trait should therefore only be
-/// >           about running `Future`s in the background.
-pub trait Executor {
-    /// Run the given future in the background until it ends.
-    fn exec(&self, future: Pin<Box<dyn Future<Output = ()> + Send>>);
-}
-
-impl<F: Fn(Pin<Box<dyn Future<Output = ()> + Send>>)> Executor for F {
-    fn exec(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) {
-        self(f)
-    }
-}
+#[derive(thiserror::Error, Debug)]
+#[error(transparent)]
+pub struct DecodeError(prost::DecodeError);

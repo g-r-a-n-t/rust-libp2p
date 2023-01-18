@@ -18,8 +18,9 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-//! Implements the floodsub protocol, see also the:
-//! [spec](https://github.com/libp2p/specs/tree/master/pubsub).
+//! Implementation of the [floodsub](https://github.com/libp2p/specs/blob/master/pubsub/README.md) protocol.
+
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 use libp2p_core::PeerId;
 
@@ -28,6 +29,7 @@ pub mod protocol;
 mod layer;
 mod topic;
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 mod rpc_proto {
     include!(concat!(env!("OUT_DIR"), "/floodsub.pb.rs"));
 }
@@ -37,6 +39,7 @@ pub use self::protocol::{FloodsubMessage, FloodsubRpc};
 pub use self::topic::Topic;
 
 /// Configuration options for the Floodsub protocol.
+#[derive(Debug, Clone)]
 pub struct FloodsubConfig {
     /// Peer id of the local node. Used for the source of the messages that we publish.
     pub local_peer_id: PeerId,

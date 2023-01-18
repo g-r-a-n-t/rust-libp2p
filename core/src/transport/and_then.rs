@@ -19,17 +19,19 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::{
-    either::EitherError,
-    transport::{ListenerEvent, Transport, TransportError},
-    ConnectedPoint,
+    connection::{ConnectedPoint, Endpoint},
+    transport::{ListenerId, Transport, TransportError, TransportEvent},
 };
-use futures::{future::Either, prelude::*};
+use either::Either;
+use futures::prelude::*;
 use multiaddr::Multiaddr;
 use std::{error, marker::PhantomPinned, pin::Pin, task::Context, task::Poll};
 
-/// See the `Transport::and_then` method.
+/// See the [`Transport::and_then`] method.
+#[pin_project::pin_project]
 #[derive(Debug, Clone)]
 pub struct AndThen<T, C> {
+    #[pin]
     transport: T,
     fun: C,
 }
@@ -48,36 +50,57 @@ where
     F::Error: error::Error,
 {
     type Output = O;
-    type Error = EitherError<T::Error, F::Error>;
-    type Listener = AndThenStream<T::Listener, C>;
+    type Error = Either<T::Error, F::Error>;
     type ListenerUpgrade = AndThenFuture<T::ListenerUpgrade, C, F>;
     type Dial = AndThenFuture<T::Dial, C, F>;
 
-    fn listen_on(self, addr: Multiaddr) -> Result<Self::Listener, TransportError<Self::Error>> {
-        let listener = self
-            .transport
+    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
+        self.transport
             .listen_on(addr)
-            .map_err(|err| err.map(EitherError::A))?;
-        // Try to negotiate the protocol.
-        // Note that failing to negotiate a protocol will never produce a future with an error.
-        // Instead the `stream` will produce `Ok(Err(...))`.
-        // `stream` can only produce an `Err` if `listening_stream` produces an `Err`.
-        let stream = AndThenStream {
-            stream: listener,
-            fun: self.fun,
-        };
-        Ok(stream)
+            .map_err(|err| err.map(Either::Left))
     }
 
-    fn dial(self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
+    fn remove_listener(&mut self, id: ListenerId) -> bool {
+        self.transport.remove_listener(id)
+    }
+
+    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
         let dialed_fut = self
             .transport
             .dial(addr.clone())
-            .map_err(|err| err.map(EitherError::A))?;
+            .map_err(|err| err.map(Either::Left))?;
         let future = AndThenFuture {
             inner: Either::Left(Box::pin(dialed_fut)),
-            args: Some((self.fun, ConnectedPoint::Dialer { address: addr })),
-            marker: PhantomPinned,
+            args: Some((
+                self.fun.clone(),
+                ConnectedPoint::Dialer {
+                    address: addr,
+                    role_override: Endpoint::Dialer,
+                },
+            )),
+            _marker: PhantomPinned,
+        };
+        Ok(future)
+    }
+
+    fn dial_as_listener(
+        &mut self,
+        addr: Multiaddr,
+    ) -> Result<Self::Dial, TransportError<Self::Error>> {
+        let dialed_fut = self
+            .transport
+            .dial_as_listener(addr.clone())
+            .map_err(|err| err.map(Either::Left))?;
+        let future = AndThenFuture {
+            inner: Either::Left(Box::pin(dialed_fut)),
+            args: Some((
+                self.fun.clone(),
+                ConnectedPoint::Dialer {
+                    address: addr,
+                    role_override: Endpoint::Listener,
+                },
+            )),
+            _marker: PhantomPinned,
         };
         Ok(future)
     }
@@ -85,68 +108,40 @@ where
     fn address_translation(&self, server: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
         self.transport.address_translation(server, observed)
     }
-}
 
-/// Custom `Stream` to avoid boxing.
-///
-/// Applies a function to every stream item.
-#[pin_project::pin_project]
-#[derive(Debug, Clone)]
-pub struct AndThenStream<TListener, TMap> {
-    #[pin]
-    stream: TListener,
-    fun: TMap,
-}
-
-impl<TListener, TMap, TTransOut, TMapOut, TListUpgr, TTransErr> Stream
-    for AndThenStream<TListener, TMap>
-where
-    TListener: TryStream<Ok = ListenerEvent<TListUpgr, TTransErr>, Error = TTransErr>,
-    TListUpgr: TryFuture<Ok = TTransOut, Error = TTransErr>,
-    TMap: FnOnce(TTransOut, ConnectedPoint) -> TMapOut + Clone,
-    TMapOut: TryFuture,
-{
-    type Item = Result<
-        ListenerEvent<
-            AndThenFuture<TListUpgr, TMap, TMapOut>,
-            EitherError<TTransErr, TMapOut::Error>,
-        >,
-        EitherError<TTransErr, TMapOut::Error>,
-    >;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<TransportEvent<Self::ListenerUpgrade, Self::Error>> {
         let this = self.project();
-        match TryStream::try_poll_next(this.stream, cx) {
-            Poll::Ready(Some(Ok(event))) => {
-                let event = match event {
-                    ListenerEvent::Upgrade {
-                        upgrade,
-                        local_addr,
-                        remote_addr,
-                    } => {
-                        let point = ConnectedPoint::Listener {
-                            local_addr: local_addr.clone(),
-                            send_back_addr: remote_addr.clone(),
-                        };
-                        ListenerEvent::Upgrade {
-                            upgrade: AndThenFuture {
-                                inner: Either::Left(Box::pin(upgrade)),
-                                args: Some((this.fun.clone(), point)),
-                                marker: PhantomPinned,
-                            },
-                            local_addr,
-                            remote_addr,
-                        }
-                    }
-                    ListenerEvent::NewAddress(a) => ListenerEvent::NewAddress(a),
-                    ListenerEvent::AddressExpired(a) => ListenerEvent::AddressExpired(a),
-                    ListenerEvent::Error(e) => ListenerEvent::Error(EitherError::A(e)),
+        match this.transport.poll(cx) {
+            Poll::Ready(TransportEvent::Incoming {
+                listener_id,
+                upgrade,
+                local_addr,
+                send_back_addr,
+            }) => {
+                let point = ConnectedPoint::Listener {
+                    local_addr: local_addr.clone(),
+                    send_back_addr: send_back_addr.clone(),
                 };
-
-                Poll::Ready(Some(Ok(event)))
+                Poll::Ready(TransportEvent::Incoming {
+                    listener_id,
+                    upgrade: AndThenFuture {
+                        inner: Either::Left(Box::pin(upgrade)),
+                        args: Some((this.fun.clone(), point)),
+                        _marker: PhantomPinned,
+                    },
+                    local_addr,
+                    send_back_addr,
+                })
             }
-            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(EitherError::A(err)))),
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(other) => {
+                let mapped = other
+                    .map_upgrade(|_upgrade| unreachable!("case already matched"))
+                    .map_err(Either::Left);
+                Poll::Ready(mapped)
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -159,7 +154,7 @@ where
 pub struct AndThenFuture<TFut, TMap, TMapOut> {
     inner: Either<Pin<Box<TFut>>, Pin<Box<TMapOut>>>,
     args: Option<(TMap, ConnectedPoint)>,
-    marker: PhantomPinned,
+    _marker: PhantomPinned,
 }
 
 impl<TFut, TMap, TMapOut> Future for AndThenFuture<TFut, TMap, TMapOut>
@@ -168,7 +163,7 @@ where
     TMap: FnOnce(TFut::Ok, ConnectedPoint) -> TMapOut,
     TMapOut: TryFuture,
 {
-    type Output = Result<TMapOut::Ok, EitherError<TFut::Error, TMapOut::Error>>;
+    type Output = Result<TMapOut::Ok, Either<TFut::Error, TMapOut::Error>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
@@ -176,7 +171,7 @@ where
                 Either::Left(future) => {
                     let item = match TryFuture::try_poll(future.as_mut(), cx) {
                         Poll::Ready(Ok(v)) => v,
-                        Poll::Ready(Err(err)) => return Poll::Ready(Err(EitherError::A(err))),
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(Either::Left(err))),
                         Poll::Pending => return Poll::Pending,
                     };
                     let (f, a) = self
@@ -188,7 +183,7 @@ where
                 Either::Right(future) => {
                     return match TryFuture::try_poll(future.as_mut(), cx) {
                         Poll::Ready(Ok(v)) => Poll::Ready(Ok(v)),
-                        Poll::Ready(Err(err)) => return Poll::Ready(Err(EitherError::B(err))),
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(Either::Right(err))),
                         Poll::Pending => Poll::Pending,
                     }
                 }

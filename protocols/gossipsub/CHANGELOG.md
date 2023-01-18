@@ -1,4 +1,172 @@
-# 0.33.0 [unreleased]
+# 0.44.0 [unreleased]
+
+- Update to `prometheus-client` `v0.19.0`. See [PR 3207].
+
+- Update to `libp2p-core` `v0.39.0`.
+
+- Update to `libp2p-swarm` `v0.42.0`.
+
+[PR 3207]: https://github.com/libp2p/rust-libp2p/pull/3207/
+
+# 0.43.0
+
+- Update to `libp2p-core` `v0.38.0`.
+
+- Update to `libp2p-swarm` `v0.41.0`.
+
+- Update to `prost-codec` `v0.3.0`.
+
+- Refactoring GossipsubCodec to use common protobuf Codec. See [PR 3070].
+
+- Replace `Gossipsub`'s `NetworkBehaviour` implementation `inject_*` methods with the new `on_*` methods.
+  See [PR 3011].
+
+- Replace `GossipsubHandler`'s `ConnectionHandler` implementation `inject_*` methods with the new `on_*` methods.
+  See [PR 3085].
+
+- Update `rust-version` to reflect the actual MSRV: 1.62.0. See [PR 3090].
+
+[PR 3085]: https://github.com/libp2p/rust-libp2p/pull/3085
+[PR 3070]: https://github.com/libp2p/rust-libp2p/pull/3070
+[PR 3011]: https://github.com/libp2p/rust-libp2p/pull/3011
+[PR 3090]: https://github.com/libp2p/rust-libp2p/pull/3090
+
+# 0.42.0
+
+- Bump rand to 0.8 and quickcheck to 1. See [PR 2857].
+
+- Update to `libp2p-core` `v0.37.0`.
+
+- Update to `libp2p-swarm` `v0.40.0`.
+
+[PR 2857]: https://github.com/libp2p/rust-libp2p/pull/2857
+
+# 0.41.0
+
+- Update to `libp2p-swarm` `v0.39.0`.
+
+- Update to `libp2p-core` `v0.36.0`.
+
+- Allow publishing with any `impl Into<TopicHash>` as a topic. See [PR 2862].
+
+[PR 2862]: https://github.com/libp2p/rust-libp2p/pull/2862
+
+# 0.40.0
+
+- Update prost requirement from 0.10 to 0.11 which no longer installs the protoc Protobuf compiler.
+  Thus you will need protoc installed locally. See [PR 2788].
+
+- Update to `libp2p-swarm` `v0.38.0`.
+
+- Update to `libp2p-core` `v0.35.0`.
+
+- Update to `prometheus-client` `v0.18.0`. See [PR 2822].
+
+[PR 2822]: https://github.com/libp2p/rust-libp2p/pull/2761/
+[PR 2788]: https://github.com/libp2p/rust-libp2p/pull/2788
+
+# 0.39.0
+
+- Update to `libp2p-core` `v0.34.0`.
+
+- Update to `libp2p-swarm` `v0.37.0`.
+
+- Allow for custom protocol ID via `GossipsubConfigBuilder::protocol_id()`. See [PR 2718].
+
+[PR 2718]: https://github.com/libp2p/rust-libp2p/pull/2718/
+
+# 0.38.1
+
+- Fix duplicate connection id. See [PR 2702].
+
+[PR 2702]: https://github.com/libp2p/rust-libp2p/pull/2702
+
+# 0.38.0
+
+- Update to `libp2p-core` `v0.33.0`.
+
+- Update to `libp2p-swarm` `v0.36.0`.
+
+- changed `TimeCache::contains_key` and `DuplicateCache::contains` to immutable methods. See [PR 2620].
+
+- Update to `prometheus-client` `v0.16.0`. See [PR 2631].
+
+[PR 2620]: https://github.com/libp2p/rust-libp2p/pull/2620
+[PR 2631]: https://github.com/libp2p/rust-libp2p/pull/2631
+
+# 0.37.0
+
+- Update to `libp2p-swarm` `v0.35.0`.
+
+- Fix gossipsub metric (see [PR 2558]).
+
+- Allow the user to set the buckets for the score histogram, and to adjust them from the score thresholds. See [PR 2595].
+
+[PR 2558]: https://github.com/libp2p/rust-libp2p/pull/2558
+[PR 2595]: https://github.com/libp2p/rust-libp2p/pull/2595
+
+# 0.36.0 [2022-02-22]
+
+- Update to `libp2p-core` `v0.32.0`.
+
+- Update to `libp2p-swarm` `v0.34.0`.
+
+- Move from `open-metrics-client` to `prometheus-client` (see [PR 2442]).
+
+- Emit gossip of all non empty topics (see [PR 2481]).
+
+- Merge NetworkBehaviour's inject_\* paired methods (see [PR 2445]).
+
+- Revert to wasm-timer (see [PR 2506]).
+
+- Do not overwrite msg's peers if put again into mcache (see [PR 2493]).
+
+[PR 2442]: https://github.com/libp2p/rust-libp2p/pull/2442
+[PR 2481]: https://github.com/libp2p/rust-libp2p/pull/2481
+[PR 2445]: https://github.com/libp2p/rust-libp2p/pull/2445
+[PR 2506]: https://github.com/libp2p/rust-libp2p/pull/2506
+[PR 2493]: https://github.com/libp2p/rust-libp2p/pull/2493
+
+# 0.35.0 [2022-01-27]
+
+- Update dependencies.
+
+- Migrate to Rust edition 2021 (see [PR 2339]).
+
+- Add metrics for network and configuration performance analysis (see [PR 2346]).
+
+- Improve bandwidth performance by tracking IWANTs and reducing duplicate sends
+  (see [PR 2327]).
+
+- Implement `Serialize` and `Deserialize` for `MessageId` and `FastMessageId` (see [PR 2408])
+
+- Fix `GossipsubConfigBuilder::build()` requiring `&self` to live for `'static` (see [PR 2409])
+
+- Implement Unsubscribe backoff as per [libp2p specs PR 383] (see [PR 2403]).
+
+[PR 2346]: https://github.com/libp2p/rust-libp2p/pull/2346
+[PR 2339]: https://github.com/libp2p/rust-libp2p/pull/2339
+[PR 2327]: https://github.com/libp2p/rust-libp2p/pull/2327
+[PR 2408]: https://github.com/libp2p/rust-libp2p/pull/2408
+[PR 2409]: https://github.com/libp2p/rust-libp2p/pull/2409
+[PR 2403]: https://github.com/libp2p/rust-libp2p/pull/2403
+[libp2p specs PR 383]: https://github.com/libp2p/specs/pull/383
+
+# 0.34.0 [2021-11-16]
+
+- Add topic and mesh metrics (see [PR 2316]).
+
+- Fix bug in internal peer's topics tracking (see [PR 2325]).
+
+- Use `instant` and `futures-timer` instead of `wasm-timer` (see [PR 2245]).
+
+- Update dependencies.
+
+[PR 2245]: https://github.com/libp2p/rust-libp2p/pull/2245
+[PR 2325]: https://github.com/libp2p/rust-libp2p/pull/2325
+[PR 2316]: https://github.com/libp2p/rust-libp2p/pull/2316
+
+# 0.33.0 [2021-11-01]
 
 - Add an event to register peers that do not support the gossipsub protocol
   [PR 2241](https://github.com/libp2p/rust-libp2p/pull/2241)

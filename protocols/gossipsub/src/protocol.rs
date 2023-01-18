@@ -18,7 +18,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::config::ValidationMode;
+use crate::config::{GossipsubVersion, ValidationMode};
 use crate::error::{GossipsubHandlerError, ValidationError};
 use crate::handler::HandlerEvent;
 use crate::rpc_proto;
@@ -29,7 +29,6 @@ use crate::types::{
 };
 use asynchronous_codec::{Decoder, Encoder, Framed};
 use byteorder::{BigEndian, ByteOrder};
-use bytes::Bytes;
 use bytes::BytesMut;
 use futures::future;
 use futures::prelude::*;
@@ -44,7 +43,7 @@ use unsigned_varint::codec;
 pub(crate) const SIGNING_PREFIX: &[u8] = b"libp2p-pubsub:";
 
 /// Implementation of [`InboundUpgrade`] and [`OutboundUpgrade`] for the Gossipsub protocol.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ProtocolConfig {
     /// The Gossipsub protocol id to listen on.
     protocol_ids: Vec<ProtocolId>,
@@ -59,21 +58,31 @@ impl ProtocolConfig {
     ///
     /// Sets the maximum gossip transmission size.
     pub fn new(
-        id_prefix: Cow<'static, str>,
+        id: Cow<'static, str>,
+        custom_id_peer_kind: Option<GossipsubVersion>,
         max_transmit_size: usize,
         validation_mode: ValidationMode,
         support_floodsub: bool,
     ) -> ProtocolConfig {
-        // support version 1.1.0 and 1.0.0 with user-customized prefix
-        let mut protocol_ids = vec![
-            ProtocolId::new(id_prefix.clone(), PeerKind::Gossipsubv1_1),
-            ProtocolId::new(id_prefix, PeerKind::Gossipsub),
-        ];
+        let protocol_ids = match custom_id_peer_kind {
+            Some(v) => match v {
+                GossipsubVersion::V1_0 => vec![ProtocolId::new(id, PeerKind::Gossipsub, false)],
+                GossipsubVersion::V1_1 => vec![ProtocolId::new(id, PeerKind::Gossipsubv1_1, false)],
+            },
+            None => {
+                let mut protocol_ids = vec![
+                    ProtocolId::new(id.clone(), PeerKind::Gossipsubv1_1, true),
+                    ProtocolId::new(id, PeerKind::Gossipsub, true),
+                ];
 
-        // add floodsub support if enabled.
-        if support_floodsub {
-            protocol_ids.push(ProtocolId::new(Cow::from(""), PeerKind::Floodsub));
-        }
+                // add floodsub support if enabled.
+                if support_floodsub {
+                    protocol_ids.push(ProtocolId::new(Cow::from(""), PeerKind::Floodsub, false));
+                }
+
+                protocol_ids
+            }
+        };
 
         ProtocolConfig {
             protocol_ids,
@@ -94,10 +103,16 @@ pub struct ProtocolId {
 
 /// An RPC protocol ID.
 impl ProtocolId {
-    pub fn new(prefix: Cow<'static, str>, kind: PeerKind) -> Self {
+    pub fn new(id: Cow<'static, str>, kind: PeerKind, prefix: bool) -> Self {
         let protocol_id = match kind {
-            PeerKind::Gossipsubv1_1 => format!("/{}/{}", prefix, "1.1.0"),
-            PeerKind::Gossipsub => format!("/{}/{}", prefix, "1.0.0"),
+            PeerKind::Gossipsubv1_1 => match prefix {
+                true => format!("/{}/{}", id, "1.1.0"),
+                false => format!("{id}"),
+            },
+            PeerKind::Gossipsub => match prefix {
+                true => format!("/{}/{}", id, "1.0.0"),
+                false => format!("{id}"),
+            },
             PeerKind::Floodsub => format!("/{}/{}", "floodsub", "1.0.0"),
             // NOTE: This is used for informing the behaviour of unsupported peers. We do not
             // advertise this variant.
@@ -168,17 +183,18 @@ where
 /* Gossip codec for the framing */
 
 pub struct GossipsubCodec {
-    /// Codec to encode/decode the Unsigned varint length prefix of the frames.
-    length_codec: codec::UviBytes,
     /// Determines the level of validation performed on incoming messages.
     validation_mode: ValidationMode,
+    /// The codec to handle common encoding/decoding of protobuf messages
+    codec: prost_codec::Codec<rpc_proto::Rpc>,
 }
 
 impl GossipsubCodec {
-    pub fn new(length_codec: codec::UviBytes, validation_mode: ValidationMode) -> Self {
+    pub fn new(length_codec: codec::UviBytes, validation_mode: ValidationMode) -> GossipsubCodec {
+        let codec = prost_codec::Codec::new(length_codec.max_len());
         GossipsubCodec {
-            length_codec,
             validation_mode,
+            codec,
         }
     }
 
@@ -251,16 +267,12 @@ impl Encoder for GossipsubCodec {
     type Item = rpc_proto::Rpc;
     type Error = GossipsubHandlerError;
 
-    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let mut buf = Vec::with_capacity(item.encoded_len());
-
-        item.encode(&mut buf)
-            .expect("Buffer has sufficient capacity");
-
-        // length prefix the protobuf message, ensuring the max limit is not hit
-        self.length_codec
-            .encode(Bytes::from(buf), dst)
-            .map_err(|_| GossipsubHandlerError::MaxTransmissionSize)
+    fn encode(
+        &mut self,
+        item: Self::Item,
+        dst: &mut BytesMut,
+    ) -> Result<(), GossipsubHandlerError> {
+        Ok(self.codec.encode(item, dst)?)
     }
 }
 
@@ -268,19 +280,11 @@ impl Decoder for GossipsubCodec {
     type Item = HandlerEvent;
     type Error = GossipsubHandlerError;
 
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        let packet = match self.length_codec.decode(src).map_err(|e| {
-            if let std::io::ErrorKind::PermissionDenied = e.kind() {
-                GossipsubHandlerError::MaxTransmissionSize
-            } else {
-                GossipsubHandlerError::Io(e)
-            }
-        })? {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, GossipsubHandlerError> {
+        let rpc = match self.codec.decode(src)? {
             Some(p) => p,
             None => return Ok(None),
         };
-
-        let rpc = rpc_proto::Rpc::decode(&packet[..]).map_err(std::io::Error::from)?;
 
         // Store valid messages.
         let mut messages = Vec::with_capacity(rpc.publish.len());
@@ -556,24 +560,20 @@ mod tests {
     use crate::IdentTopic as Topic;
     use libp2p_core::identity::Keypair;
     use quickcheck::*;
-    use rand::Rng;
 
     #[derive(Clone, Debug)]
     struct Message(RawGossipsubMessage);
 
     impl Arbitrary for Message {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+        fn arbitrary(g: &mut Gen) -> Self {
             let keypair = TestKeypair::arbitrary(g);
 
             // generate an arbitrary GossipsubMessage using the behaviour signing functionality
             let config = GossipsubConfig::default();
-            let gs: Gossipsub = Gossipsub::new(
-                crate::MessageAuthenticity::Signed(keypair.0.clone()),
-                config,
-            )
-            .unwrap();
-            let data = (0..g.gen_range(10, 10024))
-                .map(|_| g.gen())
+            let gs: Gossipsub =
+                Gossipsub::new(crate::MessageAuthenticity::Signed(keypair.0), config).unwrap();
+            let data = (0..g.gen_range(10..10024u32))
+                .map(|_| u8::arbitrary(g))
                 .collect::<Vec<_>>();
             let topic_id = TopicId::arbitrary(g).0;
             Message(gs.build_raw_message(topic_id, data).unwrap())
@@ -584,11 +584,10 @@ mod tests {
     struct TopicId(TopicHash);
 
     impl Arbitrary for TopicId {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            let topic_string: String = (0..g.gen_range(20, 1024))
-                .map(|_| g.gen::<char>())
-                .collect::<String>()
-                .into();
+        fn arbitrary(g: &mut Gen) -> Self {
+            let topic_string: String = (0..g.gen_range(20..1024u32))
+                .map(|_| char::arbitrary(g))
+                .collect::<String>();
             TopicId(Topic::new(topic_string).into())
         }
     }
@@ -597,8 +596,9 @@ mod tests {
     struct TestKeypair(Keypair);
 
     impl Arbitrary for TestKeypair {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            let keypair = if g.gen() {
+        #[cfg(feature = "rsa")]
+        fn arbitrary(g: &mut Gen) -> Self {
+            let keypair = if bool::arbitrary(g) {
                 // Small enough to be inlined.
                 Keypair::generate_ed25519()
             } else {
@@ -607,6 +607,12 @@ mod tests {
                 Keypair::rsa_from_pkcs8(&mut rsa_key).unwrap()
             };
             TestKeypair(keypair)
+        }
+
+        #[cfg(not(feature = "rsa"))]
+        fn arbitrary(_g: &mut Gen) -> Self {
+            // Small enough to be inlined.
+            TestKeypair(Keypair::generate_ed25519())
         }
     }
 
@@ -632,7 +638,7 @@ mod tests {
 
             let mut codec = GossipsubCodec::new(codec::UviBytes::default(), ValidationMode::Strict);
             let mut buf = BytesMut::new();
-            codec.encode(rpc.clone().into_protobuf(), &mut buf).unwrap();
+            codec.encode(rpc.into_protobuf(), &mut buf).unwrap();
             let decoded_rpc = codec.decode(&mut buf).unwrap().unwrap();
             // mark as validated as its a published message
             match decoded_rpc {
